@@ -1,0 +1,107 @@
+// api.proto —— 业务接入契约（proto3）。
+//
+// 模式 B：CreateTasks RPC 服务于不便直连 PG 的业务方（§5.1；模式 A 业务直写任务表组不受影响，
+// 两模式幂等语义一致：idempotency_key 冲突跳过插入、返回已存在 task_id）。
+// GetResults 为同步任务的创建方回执长轮询（§5.6）。
+// AdminService 提供死信运维面：dead 查询 + redrive（人工修复后重跑，不自动重放，§12.9）。
+syntax = "proto3";
+
+package stateflux.api.v1;
+
+option go_package = "github.com/improvtrace/stateflux/proto/gen/apiv1;apiv1";
+
+import "google/protobuf/empty.proto";
+
+// 任务创建项。callback_json 为 sdk.CallbackSpec 的 JSON 序列化（OnSuccess/OnError 回调规格，§5.8）。
+message CreateTaskItem {
+  string type = 1;
+  bytes payload = 2;
+  string priority = 3;      // high / normal / low，默认 normal
+  string exec_mode = 4;     // sync / async，默认 async
+  int64 run_at_unix_ms = 5; // 最早可调度时间（延迟任务），0 表示立即
+  int64 timeout_ms = 6;
+  int32 max_attempts = 7;   // 0 表示采用默认值
+  string idempotency_key = 8;
+  string batch_id = 9;
+  bytes callback_json = 10;
+}
+
+message CreateTasksRequest {
+  repeated CreateTaskItem items = 1;
+}
+
+message CreatedTask {
+  int64 task_id = 1;
+  // true = idempotency_key 冲突，返回的是已存在任务 ID（§5.1）。
+  bool duplicate = 2;
+}
+
+message CreateTasksResponse {
+  repeated CreatedTask tasks = 1;
+}
+
+message GetResultsRequest {
+  repeated int64 task_ids = 1;
+  // 长轮询等待时长（毫秒）；0 表示立即返回当前快照。服务端命中全部终态即提前返回（§5.6）。
+  int64 wait_ms = 2;
+}
+
+message TaskResultItem {
+  int64 task_id = 1;
+  // 任务当前所在阶段集合：pending / schedulable / processing / completed / unknown。
+  string stage = 2;
+  // 以下字段仅终态任务填写（来自 task_results，§3.1）。
+  string outcome = 3; // succeeded / failed / dead
+  int64 attempt = 4;
+  bytes result = 5;
+  string error = 6;
+  int64 completed_at_unix_ms = 7;
+}
+
+message GetResultsResponse {
+  repeated TaskResultItem results = 1;
+}
+
+message ListDeadTasksRequest {
+  string type = 1;    // 按任务类型过滤（可空）
+  int32 limit = 2;    // 默认 100
+  int64 cursor = 3;   // 上一页最后一条的任务 ID（0 表示从头）
+}
+
+message DeadTask {
+  int64 task_id = 1;
+  string type = 2;
+  bytes payload = 3;
+  int32 attempts = 4;
+  int32 max_attempts = 5;
+  string error = 6;
+  int64 created_at_unix_ms = 7;
+  int64 completed_at_unix_ms = 8;
+}
+
+message ListDeadTasksResponse {
+  repeated DeadTask tasks = 1;
+  int64 next_cursor = 2;
+}
+
+message RedriveTasksRequest {
+  // 重新入队的 dead 任务 ID 列表；重跑产生全新任务实例（新雪花 ID、attempts 归零，§12.9）。
+  repeated int64 task_ids = 1;
+}
+
+message RedriveTasksResponse {
+  repeated int64 new_task_ids = 1;
+}
+
+// 业务接入点（所有 API 节点提供）。
+service TaskService {
+  rpc CreateTasks(CreateTasksRequest) returns (CreateTasksResponse);
+  rpc GetResults(GetResultsRequest) returns (GetResultsResponse);
+}
+
+// 死信运维接口。
+service AdminService {
+  rpc ListDeadTasks(ListDeadTasksRequest) returns (ListDeadTasksResponse);
+  rpc RedriveTasks(RedriveTasksRequest) returns (RedriveTasksResponse);
+  rpc Ping(google.protobuf.Empty) returns (google.protobuf.Empty);
+}

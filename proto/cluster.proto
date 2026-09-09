@@ -1,0 +1,33 @@
+// cluster.proto —— 外部契约（proto3，§7）。
+//
+// 该服务由外部选举/成员系统实现，stateflux 只消费（§1.2.6「集群信息只读不治」）：
+// 进程通过周期性 RPC 获取当前集群节点信息（成员、角色、能力标签）与当前调度节点位置，
+// 据此决定本实例启用哪些角色（§2.1）。stateflux 不实现选举。
+syntax = "proto3";
+
+package stateflux.cluster.v1;
+
+option go_package = "github.com/improvtrace/stateflux/proto/gen/clusterv1;clusterv1";
+
+message ClusterInfoRequest {}
+
+message NodeInfo {
+  // 节点唯一 ID（集群内稳定）。
+  string node_id = 1;
+  // gRPC 服务地址（host:port），供 Execute/Collect 调用。
+  string address = 2;
+  // 本节点承担的角色：api / executor / scheduler / collector 等（§2.1）。
+  repeated string roles = 3;
+  // 能力标签：同步任务选节点时做 capabilities 匹配（§5.3）。
+  repeated string capabilities = 4;
+}
+
+message ClusterInfoResponse {
+  repeated NodeInfo nodes = 1;
+  // 当前调度节点 ID（外部选举结果）。空表示集群暂无调度节点。
+  string scheduler_node_id = 2;
+}
+
+service ClusterService {
+  rpc GetClusterInfo(ClusterInfoRequest) returns (ClusterInfoResponse);
+}
