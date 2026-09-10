@@ -3,3 +3,7 @@
 *.out
 .stateflux-wal/
 .zcode/
+# ent 生成码不入库：由 `make generate` 从 internal/domain/schema 产出
+**/ent/
+# protobuf 生成码不入库：由 `make proto` 从 api/ 下 proto 产出（与 proto 同目录）
+api/**/*.pb.go

@@ -1,0 +1,11 @@
+// task.proto —— 调度↔执行契约（proto3）。
+//
+// 定位：ExecutorService（Execute 任务执行 / Collect 结果归集上报）与统一
+// TaskMessage 信封。生成码仅模块内 import：调度侧经 task/dispatch 客户端池调用，
+// 执行侧 worker 提供 server，业务实现由 biz 承载。
+// 消息与服务定义按设计文档在实施阶段落定，当前仅占位包名与路径。
+syntax = "proto3";
+
+package stateflux.task.v1;
+
+option go_package = "github.com/improvtrace/stateflux/api/stateflux/task/v1;taskv1";

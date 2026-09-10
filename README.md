@@ -1,11 +1,15 @@
 # stateflux
 
-基于 **PostgreSQL（唯一权威）+ Redis（实时视图）** 的分布式任务调度框架（Go）。
+基于 **PostgreSQL（唯一权威）+ Redis（实时视图）** 的分布式任务调度服务（Go 实现，独立部署运行）。
 单调度节点集权、执行侧无状态、选举外置——以四个阶段集合承载任务生命周期，
-结果至多落一次库、绝不丢（at-least-once 交付 + 业务幂等）。
+结果至多落一次库、绝不丢（at-least-once 交付 + 业务幂等）。业务经本地事务直写任务表组
+（outbox 式）接入（业务接入 RPC 契约不做），执行逻辑以 Handler 在构建时注册。
 
-> 设计方案：[`.docs/design/stateflux-design.md`](./.docs/design/stateflux-design.md)
-> （本实现对应 v3.8，§12 实施顺序第 1~10 步；第 11 步扩展开关按需启用，见文末）。
+> 设计方案：[`.docs/design/README.md`](./.docs/design/README.md)（已按主题拆分为多个文件，§ 编号全库沿用，映射见索引）
+> （目录布局对齐 **v3.16**；当前处于骨架阶段——目录结构与 proto 契约已定稿，各包业务实现按 §12
+> 实施顺序重建，第 11 步扩展开关按需启用。布局演进见 §8/§8.1：v3.10 Go 标准布局收编，
+> v3.12 数据访问分层，v3.14 domain 四层，v3.15 内核并入 domain，
+> v3.16 契约收编 api/ + biz/调度侧/执行侧两运行时）。
 
 ## 特性
 
@@ -26,119 +30,131 @@
   退避为 capped exponential + full jitter。
 - **TaskFactory**（§5.7）：period/cron 生成一次性实例；`next = last_success + period` 现算、
   错过窗口即跳过、超限冻结孤儿。
-- **观测**（§6.5）：指标统一 OpenTelemetry（OTLP 导出可替换），§6.5 最小指标集全量埋点。
+- **观测**（§6.5）：指标与链路追踪统一 OpenTelemetry（OTLP 导出可替换），§6.5 最小指标集全量埋点。
 
-## 模块（§8）
+## 模块（§8，v3.16）
 
 ```
 stateflux/
-├── cmd/stateflux/   # 官方服务装配（参考实现）：全角色合一的单进程入口
-├── proto/           # 契约（proto3）：dispatch（内部）/ cluster（外部选举）/ api（业务接入）
-├── sdk/             # 业务方唯一依赖面：Task/TaskResult/Handler/CallbackSpec/退避/雪花 ID
-├── api/             # 创建（模式 B RPC）/ 长轮询回执 / 死信运维面
-├── scheduler/       # 约束晋升 / 自适应认领 / sync 分发池 / async LPUSH / 统一结果缓冲
-├── executor/        # 消费循环 / 租约 / 结果 WAL / gRPC server / 客户端池
-├── collector/       # Collect 拉取 → 终态事务（含回调派生）→ 墓碑 → Ack
-├── factory/         # TaskFactory 周期任务生成（仅调度节点运行）
-├── reconcile/       # R1~R4 对账
-├── store/           # 阶段集合逻辑接口；默认实现 = ent + PG 四阶段表 + payload 分离
-├── queue/           # Redis 视图：就绪队列 / inprocess 集合 / 墓碑 / 节点容量
-├── cluster/         # ClusterView 外部接口 + static 单机实现 + RPC 客户端
-├── config/          # 配置与 OTel MeterProvider/OTLP 装配
-└── obs/             # §6.5 最小指标集（低基数标签纪律）
+├── api/             # 全部 proto 契约（生成码与 proto 同目录）
+│   ├── stateflux/task/v1/  # 调度↔执行契约：ExecutorService（Execute/Collect）+ TaskMessage（仅模块内 import）
+│   └── cluster/v1/         # 外置 cluster 访问契约：ClusterService（外部实现、stateflux 消费）
+├── cmd/stateflux/   # 进程入口：flag/env → config → obs 装配 → internal/server 编排启动
+│                    # （工具链命令如实时指标查询，按需在 cmd/ 扩展）
+├── internal/        # 引擎收编（Go internal 可见性：外部模块禁止 import）
+│   ├── server/      # 编排层：biz + scheduler 运行时 + worker 运行时的装配与启停 + Handler 注册点（§7）
+│   ├── biz/         # task/v1 服务端业务：Execute 执行编排 / Collect 结果上报
+│   ├── controller/  # 控制面（调度侧）运行时归组：随选举启停，仅调度节点运行
+│   │   ├── scheduler/ # 调度核心：约束晋升 / 自适应认领 / sync 分发池 / async LPUSH
+│   │   ├── collector/ # Collect 拉取 → 终态事务（含回调派生）→ 墓碑 → Ack
+│   │   └── reconcile/ # R1~R4 对账
+│   ├── worker/      # 执行侧运行时（常驻所有节点）：消费循环 / 租约 / 结果 WAL / task/v1 gRPC server（委托 biz）
+│   ├── task/        # 任务构建与分发：factory（周期任务生成）/ dispatch（客户端池 + 统一结果缓冲）
+│   ├── domain/      # 领域层 + 引擎共享内核（按 model 划分文件）：task/callback/result/ops +
+│   │   │            #   聚合接口（Task/Result/Ops）+ 组合根 Store + Handler/退避/雪花 ID
+│   │   ├── repository/ # 仓储实现层：聚合语义（创建/晋升/认领/终态/对账/查询，ent 类型安全 API）
+│   │   ├── data/     # 数据源基建：pg 连接池 + ent client、redis client（ent 生成码构建时生成，不入库）
+│   │   ├── cacheview/ # Redis 视图：就绪队列 / inprocess 集合 / 墓碑 / 节点容量
+│   │   ├── migration/ # 数据面迁移：bootstrap DDL + ent migrations
+│   │   └── schema/   # ent 表定义（代码生成输入：四阶段表 + payload + result）
+│   ├── cluster/     # ClusterView 外部接口 + static 单机实现 + RPC 客户端
+│   ├── config/      # 配置结构与默认值补全（含 metrics/tracing 装配参数）
+│   └── obs/         # metrics + tracing：OTel MeterProvider/TracerProvider/OTLP 装配
+├── build/           # 打包与本地环境：服务 Dockerfile + docker-compose（PG/Redis 开发栈）
+└── hack/            # 开发脚本：dev.sh（中间件启停 + demo 冒烟运行）
 ```
 
-依赖方向：`cmd → 角色包 → store/queue → sdk`。各角色包可独立装配（§1.2.8 框架优先）：
-业务方可把 executor 角色嵌入自身进程，其余角色由独立 stateflux 服务承担。
+依赖方向：`cmd/stateflux → internal/server（编排 biz/controller/worker）→ biz、控制面运行时
+（controller）、执行侧运行时（worker）、task（factory/dispatch）→ domain/cluster`；
+数据访问 `domain ← repository/cacheview ← data ← schema/migration` 由装配注入，运行时包不 import
+实现包。biz/controller/worker 相互零依赖——调度↔执行仅经 `api/stateflux/task/v1` 契约与
+`task/dispatch` 传递，全服务只有一条 PG 终态写路径（§5.5）。本项目交付**独立部署的调度服务**
+（§1.2.8 服务优先）：全部引擎包收编 `internal/`，「不作为三方库对外承诺 API、不支持嵌入业务进程」
+由 Go internal 可见性规则编译器强制；对外 Go 包仅 `api/cluster/v1`，`api/stateflux/task/v1`
+生成码仅模块内 import。
+业务执行逻辑以 Handler 在**构建时**注册（接入点 `internal/server.RegisterHandlers`），
+task/v1 服务端业务由 `internal/biz` 承载。
 
 ## 快速开始
 
 ### 1. 准备中间件
 
-PostgreSQL 12+ 与 Redis 5+（本仓库测试使用 embedded-postgres 与 miniredis，生产请自备 HA 实例）。
+PostgreSQL 12+ 与 Redis 5+（本地可用 `hack/dev.sh up` 拉起，生产请自备 HA 实例）。
 
-### 2. 注册 Handler 并启动单进程（static 单机模式）
+### 2. 注册 Handler（构建时，static 单机模式）
+
+业务执行逻辑以 `domain.Handler` 形式在**构建时**注册，接入点为 `internal/server` 的
+`RegisterHandlers`（§7；`-demo` 冒烟模式随实现重建恢复）：
 
 ```go
-// 业务方在嵌入形态下自行装配（cmd/stateflux 是同样的装配）：
-reg := sdk.NewRegistry()
-reg.Register(&sdk.HandlerFunc{
+// internal/server —— RegisterHandlers（§7 执行接入点）：
+reg.Register(&domain.HandlerFunc{
     HandlerType: "email.send",
-    Exec: func(ctx context.Context, task *sdk.Task) ([]byte, error) {
+    Exec: func(ctx context.Context, task *domain.Task) ([]byte, error) {
         // task.Payload 为 JSON 载荷；返回值原样写入 task_results.result（jsonb）
         return []byte(`{"sent":true}`), nil
     },
 })
-
-wal, _ := executor.OpenWAL(executor.WALConfig{Dir: "/var/lib/stateflux/wal"}, logger)
-exec, _ := executor.New(executor.Options{NodeID: "node-1", Registry: reg, Queue: q, WAL: wal})
-go exec.Run(ctx)
 ```
 
-### 3. 创建任务（两种模式，幂等语义一致）
+构建：`make build`（入口 `cmd/stateflux`；当前 main 为骨架占位，启动参数随实现重建恢复）。
 
-**模式 A（首选）业务直写任务表组（outbox 式）**：在业务状态变更的同一本地事务内
-`INSERT INTO pending_tasks + task_payloads`（字段见 `store/ent/schema`，payload 必须 JSON，
-`id` 用业务侧雪花/任意唯一整数）。
+### 3. 创建任务（业务直写，outbox 式）
 
-**模式 B `CreateTasks` RPC**：
-
-```go
-conn, _ := grpc.NewClient("127.0.0.1:7000", grpc.WithTransportCredentials(insecure.NewCredentials()))
-client := apiv1.NewTaskServiceClient(conn)
-resp, _ := client.CreateTasks(ctx, &apiv1.CreateTasksRequest{Items: []*apiv1.CreateTaskItem{{
-    Type: "email.send", Payload: []byte(`{"to":"a@b.c"}`),
-    IdempotencyKey: "order-1", ExecMode: "async",   // sync 任务用 GetResults 长轮询等回执
-}}})
-```
-
-同步任务回执（§5.6）：
-
-```go
-resp, _ := client.GetResults(ctx, &apiv1.GetResultsRequest{TaskIds: ids, WaitMs: 10000})
-```
+在业务状态变更的同一本地事务内 `INSERT INTO pending_tasks + task_payloads`
+（字段见 `internal/domain/schema`，payload 必须 JSON，`id` 用业务侧雪花/任意唯一整数；
+`idempotency_key` 冲突跳过插入、沿用已存在 task_id）。业务接入 RPC 契约不做（§5.1）；
+同步任务回执直查 `task_results`（§5.6）。
 
 ### 4. 集群部署
 
-- 全部实例跑同一个二进制 `cmd/stateflux`；
-- 外部选举/成员服务实现 `proto/cluster.proto` 的 `GetClusterInfo`（返回节点列表与
+- 全部实例跑同一个二进制 `stateflux`（`make build`，入口 `cmd/stateflux`）；
+- 外部选举/成员服务实现 `api/cluster/v1` 的 `GetClusterInfo`（返回节点列表与
   `scheduler_node_id`），各实例以 `--cluster-mode external --cluster-endpoint ...` 接入；
-- 被选举为调度节点的实例自动启用 Scheduler/Collector/Reconciler/Factory 角色；
+- 被选举为调度节点的实例自动启用控制面运行时（Controller：Scheduler/Collector/Reconciler）与
+  Factory；
   故障切换无交接协议——认领与对账全部幂等，新调度节点从 PG 自然接管。
 - static 模式（默认）把全部角色赋给本进程，单机闭环（开发/小规模）。
 
 ### 5. 观测
 
-`config.NewMeterProvider` 装配全局 OTel MeterProvider（OTLP gRPC/HTTP，默认 60s 推送）；
-指标清单见设计 §6.5（队列深度、inprocess 大小、claim→投递延迟、归集延迟、R1 重置次数、
-注册拒绝数、终态计数、WAL 水位、free_slots、handler 耗时）。
+`obs` 装配全局 OTel MeterProvider/TracerProvider（OTLP，默认 60s 推送；metrics + tracing，
+装配随实现重建，§12.10）；指标清单见设计 §6.5（队列深度、inprocess 大小、claim→投递延迟、
+归集延迟、R1 重置次数、注册拒绝数、终态计数、WAL 水位、free_slots、handler 耗时）。
 
 ## 开发
 
 ```bash
-make proto   # 需要 protoc + protoc-gen-go + protoc-gen-go-grpc
-make generate # ent 代码生成（store/ent/schema）
-make test    # 全量测试（store/reconcile/e2e 自动拉起 embedded PG；queue 使用 miniredis）
-make build   # 构建 cmd/stateflux
+make proto   # 需要 protoc + protoc-gen-go + protoc-gen-go-grpc（契约统一 api/，task/v1 与 cluster/v1 各一条命令）
+make generate # ent 代码生成（--feature sql/upsert,sql/lock,sql/execquery；schema：internal/domain/schema → 输出 internal/domain/data/ent；生成码不入库，克隆后先执行）
+make build   # 构建内置服务 stateflux（入口 cmd/stateflux，产物 ./stateflux）
 ```
 
-测试基座：`internal/testpg`（共享 embedded PostgreSQL，验证 SKIP LOCKED / 部分唯一索引 /
-数据修改型 CTE 等 PG 专属行为）。
+本地开发与打包：
+
+```bash
+hack/dev.sh up    # docker compose 拉起 PG + Redis（build/docker-compose.yml，仅绑定 127.0.0.1）
+hack/dev.sh run   # 构建并以 demo Handler 启动单机闭环（API :7000）
+hack/dev.sh down  # 停止并清理中间件
+docker build -f build/Dockerfile -t stateflux .   # 服务镜像（多阶段构建，distroless 运行）
+```
 
 ## 实现说明（与设计稿的对应关系）
 
+> 以下为 v3.15 实现沉淀的设计对齐结论；实现清空后按 §12 重建时沿用。
+
 - **attempts 计数**：仅认领时 +1（§14.3 确认决策），fencing token = 每次执行的 attempts 值；
   对账重置不直接改 attempts——重置消耗重试预算体现在随后的重新认领（+1）上；
-  attempts 耗尽（`attempts >= max_attempts`）由 store 在重试/重置 SQL 内路由 `completed{dead}`（R3）。
+  attempts 耗尽（`attempts >= max_attempts`）由仓储在重试/重置事务内路由 `completed{dead}`（R3）。
 - **回调规格**：任务行 `callback` 字段只含 `OnSuccess`/`OnError` 两个子规格；子规格可嵌套
-  （其自身完成后再派生），深度上限 `sdk.MaxCallbackDepth = 8`。参数注入照搬 Machinery 核心：
+  （其自身完成后再派生），深度上限 `domain.MaxCallbackDepth = 8`。参数注入照搬 Machinery 核心：
   OnSuccess 注入 `parent_result`、OnError 注入 `parent_error`（模板 JSON 对象合并）。
   派生任务默认 async、继承父任务 type 之外的全部执行参数。
 - **幂等键唯一性**（§3.1 遗留项落地）：创建时跨非终态三表查重 + 各表局部唯一索引
   （`CREATE UNIQUE INDEX ... WHERE idempotency_key <> ''`，ent 注解不支持谓词索引，由
-  `store.Migrate` 幂等 DDL 补建）+ `INSERT ... ON CONFLICT DO NOTHING`。
+  `data.Migrate` 幂等 DDL 补建）+ ent upsert（`CreateBulk ... ON CONFLICT ... DO NOTHING`）。
 - **NOTIFY 唤醒**（§5.1）：语句级触发器 `stateflux_new_task`（payload 留空），专用连接 LISTEN
-  （`store.NotifyWatcher`，与 PgBouncer transaction mode 不兼容的约束已隔离）；定时 tick 兜底
+  （`pg.NotifyWatcher`，与 PgBouncer transaction mode 不兼容的约束已隔离）；定时 tick 兜底
   不可关闭——NOTIFY 仅作低延迟优化。
 - **同步任务的 inprocess 窗口**：Execute 响应后即移出成员（§5.4）；响应之后、终态落库之前
   的窗口由调度侧统一结果缓冲 + 对账 grace + attempt 校验收敛（at-least-once）。
