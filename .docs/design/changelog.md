@@ -2,6 +2,11 @@
 
 > 当前版本见 [README](./README.md)；各主题文件头部标注所对应的版本。
 
+## v3.17（2026-09-11）：控制面运行时归组目录更名
+
+- `internal/controller/` 更名 `internal/runtime/`（目录名对齐「运行时」归组语义；
+  scheduler/collector/reconcile 子包不变，纯目录更名、运行语义零变更）。
+
 ## v3.16（2026-09-10）：契约收编 api/ + 两运行时模型 + 契约面收敛
 
 - 所有 proto 收拢至顶层 `api/`（`stateflux/task/v1` 调度↔执行契约、`cluster/v1` 外置集群契约，

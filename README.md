@@ -9,7 +9,7 @@
 > （目录布局对齐 **v3.16**；当前处于骨架阶段——目录结构与 proto 契约已定稿，各包业务实现按 §12
 > 实施顺序重建，第 11 步扩展开关按需启用。布局演进见 §8/§8.1：v3.10 Go 标准布局收编，
 > v3.12 数据访问分层，v3.14 domain 四层，v3.15 内核并入 domain，
-> v3.16 契约收编 api/ + biz/调度侧/执行侧两运行时）。
+> v3.16 契约收编 api/ + biz/调度侧/执行侧两运行时，v3.17 控制面运行时目录更名 runtime）。
 
 ## 特性
 
@@ -32,7 +32,7 @@
   错过窗口即跳过、超限冻结孤儿。
 - **观测**（§6.5）：指标与链路追踪统一 OpenTelemetry（OTLP 导出可替换），§6.5 最小指标集全量埋点。
 
-## 模块（§8，v3.16）
+## 模块（§8，v3.17）
 
 ```
 stateflux/
@@ -44,7 +44,7 @@ stateflux/
 ├── internal/        # 引擎收编（Go internal 可见性：外部模块禁止 import）
 │   ├── server/      # 编排层：biz + scheduler 运行时 + worker 运行时的装配与启停 + Handler 注册点（§7）
 │   ├── biz/         # task/v1 服务端业务：Execute 执行编排 / Collect 结果上报
-│   ├── controller/  # 控制面（调度侧）运行时归组：随选举启停，仅调度节点运行
+│   ├── runtime/     # 控制面（调度侧）运行时归组：随选举启停，仅调度节点运行
 │   │   ├── scheduler/ # 调度核心：约束晋升 / 自适应认领 / sync 分发池 / async LPUSH
 │   │   ├── collector/ # Collect 拉取 → 终态事务（含回调派生）→ 墓碑 → Ack
 │   │   └── reconcile/ # R1~R4 对账
@@ -64,10 +64,10 @@ stateflux/
 └── hack/            # 开发脚本：dev.sh（中间件启停 + demo 冒烟运行）
 ```
 
-依赖方向：`cmd/stateflux → internal/server（编排 biz/controller/worker）→ biz、控制面运行时
-（controller）、执行侧运行时（worker）、task（factory/dispatch）→ domain/cluster`；
+依赖方向：`cmd/stateflux → internal/server（编排 biz/runtime/worker）→ biz、控制面运行时
+（runtime）、执行侧运行时（worker）、task（factory/dispatch）→ domain/cluster`；
 数据访问 `domain ← repository/cacheview ← data ← schema/migration` 由装配注入，运行时包不 import
-实现包。biz/controller/worker 相互零依赖——调度↔执行仅经 `api/stateflux/task/v1` 契约与
+实现包。biz/runtime/worker 相互零依赖——调度↔执行仅经 `api/stateflux/task/v1` 契约与
 `task/dispatch` 传递，全服务只有一条 PG 终态写路径（§5.5）。本项目交付**独立部署的调度服务**
 （§1.2.8 服务优先）：全部引擎包收编 `internal/`，「不作为三方库对外承诺 API、不支持嵌入业务进程」
 由 Go internal 可见性规则编译器强制；对外 Go 包仅 `api/cluster/v1`，`api/stateflux/task/v1`
@@ -111,7 +111,7 @@ reg.Register(&domain.HandlerFunc{
 - 全部实例跑同一个二进制 `stateflux`（`make build`，入口 `cmd/stateflux`）；
 - 外部选举/成员服务实现 `api/cluster/v1` 的 `GetClusterInfo`（返回节点列表与
   `scheduler_node_id`），各实例以 `--cluster-mode external --cluster-endpoint ...` 接入；
-- 被选举为调度节点的实例自动启用控制面运行时（Controller：Scheduler/Collector/Reconciler）与
+- 被选举为调度节点的实例自动启用控制面运行时（Runtime：Scheduler/Collector/Reconciler）与
   Factory；
   故障切换无交接协议——认领与对账全部幂等，新调度节点从 PG 自然接管。
 - static 模式（默认）把全部角色赋给本进程，单机闭环（开发/小规模）。

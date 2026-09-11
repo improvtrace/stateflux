@@ -1,8 +1,8 @@
 # stateflux 设计 · 模块划分（§8）
 
-> v3.16（2026-09-10）。§ 编号全库沿用，文件映射见 [README](./README.md)。
+> v3.17（2026-09-11）。§ 编号全库沿用，文件映射见 [README](./README.md)。
 
-## 8. 模块划分（v3.10 收编；v3.12 domain/repository；v3.15 内核并入 domain；v3.16 契约收编 api/ + 两运行时）
+## 8. 模块划分（v3.10 收编；v3.12 domain/repository；v3.15 内核并入 domain；v3.16 契约收编 api/ + 两运行时；v3.17 controller 更名 runtime）
 
 ```
 stateflux/
@@ -14,7 +14,7 @@ stateflux/
 ├── internal/         # 引擎收编（Go internal 可见性：外部模块禁止 import；无顶层公开引擎包）
 │   ├── server/       # 编排层：biz + scheduler 运行时 + worker 运行时的装配与启停 + Handler 注册点（§7）
 │   ├── biz/          # task/v1 服务端业务：Execute 执行编排 / Collect 结果上报（经 server 装配注入 worker）
-│   ├── controller/   # 控制面（调度侧）运行时归组：随选举启停，仅调度节点运行
+│   ├── runtime/      # 控制面（调度侧）运行时归组：随选举启停，仅调度节点运行
 │   │   ├── scheduler/  # 调度核心：约束晋升预处理/自适应认领/同步分发池/异步投递/选节点
 │   │   ├── collector/  # 阶段4 结果归集：Collect 拉取 → 终态搬移(含 payload 合并)/回调派生 → Ack
 │   │   └── reconcile/  # R1~R4 对账
@@ -44,14 +44,14 @@ stateflux/
 └── hack/             # 开发脚本：dev.sh（中间件启停 + demo 冒烟运行）
 ```
 
-依赖方向：`cmd/stateflux → internal/server（编排 biz/controller/worker）→ biz、控制面运行时
-（controller：scheduler/collector/reconcile）、执行侧运行时（worker）、任务运行时（task：factory/dispatch）
+依赖方向：`cmd/stateflux → internal/server（编排 biz/runtime/worker）→ biz、控制面运行时
+（runtime：scheduler/collector/reconcile）、执行侧运行时（worker）、任务运行时（task：factory/dispatch）
 → domain/cluster`；数据访问 `domain ← repository/cacheview ← data ← schema/migration`（接口 ←
 聚合实现与缓存视图 ← 数据源基建 ← 表定义/迁移）由装配（server/cmd）注入，运行时包不 import
-实现包。目录自上而下即架构分层：装配（cmd/server）→ 业务面（biz）与两运行时（controller/worker）→
+实现包。目录自上而下即架构分层：装配（cmd/server）→ 业务面（biz）与两运行时（runtime/worker）→
 任务运行时（task）与领域（domain）→ 集群视图（cluster）；`domain` 为贯穿各层的共享内核
 （模型 + 聚合接口 + 执行接入契约）。
-biz/controller/worker 相互零依赖——调度↔执行仅经 `api/stateflux/task/v1` 契约与 `task/dispatch`
+biz/runtime/worker 相互零依赖——调度↔执行仅经 `api/stateflux/task/v1` 契约与 `task/dispatch`
 （同步分发连接池 + 统一结果缓冲）传递，全服务只有一条 PG 终态写路径（§5.5）。`domain` 为领域模型 +
 纯接口层（§3.1 阶段集合抽象）：按聚合拆分为 TaskRepository（创建/晋升/
 认领）、ResultRepository（终态事务/重置/查询）与 OpsRepository（对账扫描/死信运维/工厂判定），
@@ -92,7 +92,8 @@ collector → Result，跨聚合的 reconcile/factory/biz → Store）。默认 
 归组 `internal/task/`，仓储全面 ent 化，测试代码清空；v3.16 增量：proto 契约收编 `api/`（`proto/`、
 `internal/proto/` 取消），`internal/api` 更名 `internal/biz`（承载 task/v1 服务端业务），`executor`
 更名 `worker`、`scheduler`/`collector`/`reconcile` 收拢至 `internal/controller/`（控制面归组），
-`queue` 下沉 `domain/cacheview`，迁移独立 `domain/migration`。原始清单：
+`queue` 下沉 `domain/cacheview`，迁移独立 `domain/migration`；v3.17 增量：`internal/controller`
+更名 `internal/runtime`（控制面运行时归组目录更名，归组语义与运行语义不变）。原始清单：
 
 1. `git mv` 14 个引擎包入 `internal/`：sdk/api/scheduler/executor/collector/factory/reconcile/
    dispatch/store/storepg/queue/cluster/config/obs（`storepg/ent` 生成码随包整体移动）；

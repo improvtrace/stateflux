@@ -1,6 +1,6 @@
 # stateflux 设计 · 准则与总体架构（§1–§2）
 
-> v3.16（2026-09-10）。§ 编号全库沿用，文件映射见 [README](./README.md)。
+> v3.17（2026-09-11）。§ 编号全库沿用，文件映射见 [README](./README.md)。
 
 ## 1. 设计准则（硬约束）
 
@@ -41,7 +41,7 @@
    崩溃无损失，扩容就是加进程。
 8. **服务优先（v3.9 修订，v3.10 以 internal/ 机制固化）**：本项目交付的是**独立部署的分布式任务
    调度服务**——单一官方二进制（`cmd/stateflux` 入口 + `internal/server` 编排装配）即产品本体；
-   各运行时与角色包（biz/controller（scheduler/collector/reconcile）/worker/factory/dispatch）是
+   各运行时与角色包（biz/runtime（scheduler/collector/reconcile）/worker/factory/dispatch）是
    服务的引擎内部组件，置于 `internal/` 之下，「不作为三方库对外承诺 API、不支持嵌入业务进程」由
    Go internal 可见性规则**编译器强制**（§8；无顶层公开引擎包，内核并入 `internal/domain`，见 §8）。
    业务经本地事务直写任务表组跨进程接入（§5.1；业务接入 RPC 契约不做）；业务执行逻辑以
@@ -60,7 +60,7 @@ flowchart LR
     end
 
     subgraph Cluster["stateflux 集群（同一二进制 × N 实例）"]
-        S[Controller 运行时（Scheduler/Collector/Reconcile）：唯一，由外部选举指定]
+        S[控制面运行时 Runtime（Scheduler/Collector/Reconcile）：唯一，由外部选举指定]
         W1[Worker 运行时（task/v1 server，业务实现 biz）：所有节点]
         W2[Worker 运行时]
     end
@@ -82,7 +82,7 @@ flowchart LR
 
 - 集群里运行同一个二进制 `stateflux` 的 N 个实例，每个实例通过 `ClusterView`（外部选举服务的 RPC
   客户端）周期性获取节点信息：节点 ID/地址/角色/能力标签 + 当前调度节点 ID。
-- 角色启用：**Worker 运行时（含 biz 业务实现）所有实例常驻**；**Controller 运行时
+- 角色启用：**Worker 运行时（含 biz 业务实现）所有实例常驻**；**控制面运行时 Runtime
   （Scheduler/Collector/Reconciler）** 仅在外部选举指向本实例时运行，故障切换后新调度节点从 PG
   自然接管（认领与对账全部幂等，无需交接协议）。路由、并发与业务约束全部在 Scheduler 内（§1.2.7）；
   Worker 实例只执行，无差别可替换。

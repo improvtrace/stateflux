@@ -1,6 +1,6 @@
 # stateflux 设计 · 实施顺序、边界与已确认决策（§12–§14）
 
-> v3.16（2026-09-10）。§ 编号全库沿用，文件映射见 [README](./README.md)。
+> v3.17（2026-09-11）。§ 编号全库沿用，文件映射见 [README](./README.md)。
 
 ## 12. 实施顺序
 
@@ -13,12 +13,12 @@
 3. cacheview（`domain/cacheview`）：inprocess 集合 Lua（注册/续约/移除，含墓碑与归属校验）+ 就绪队列；
 4. worker：task/v1 gRPC server + biz（Execute/Collect 服务端业务）+ Handler 注册表 + 消费循环 +
    结果 WAL（落盘/重放/水位反压）；
-5. scheduler（`internal/controller/scheduler`）：单调度节点闭环（约束晋升 → 自适应认领 → sync
+5. scheduler（`internal/runtime/scheduler`）：单调度节点闭环（约束晋升 → 自适应认领 → sync
    分发池 / async LPUSH）+ 统一结果缓冲；
-6. collector（`internal/controller/collector`）：Collect 拉取 → 终态事务（processing→completed 搬移，
+6. collector（`internal/runtime/collector`）：Collect 拉取 → 终态事务（processing→completed 搬移，
    payload 合并 + task_results 写入 + 回调派生，同一事务；单测：重复归集不重复写结果、不重复派生）
    → 墓碑 → Ack（僵尸节点归集上报必须被拒）；
-7. reconcile（`internal/controller/reconcile`）：R1~R4（退避 full jitter）+ 进程全灭重启的收敛验证；
+7. reconcile（`internal/runtime/reconcile`）：R1~R4（退避 full jitter）+ 进程全灭重启的收敛验证；
 8. cluster.static 单机闭环 → 接入外部 ClusterView，验证调度节点故障切换；
 9. 死信运维：dead 直查与 redrive（人工修复后重跑，不自动重放；SQL 直查，不设运维 RPC）；
 10. OTel 观测埋点（§6.5 指标清单 + tracing）+ 压测调优（batch/tick/lease/grace 参数扫描；监控 PG
