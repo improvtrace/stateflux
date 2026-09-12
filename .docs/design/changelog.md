@@ -2,6 +2,32 @@
 
 > 当前版本见 [README](./README.md)；各主题文件头部标注所对应的版本。
 
+## v3.19（2026-09-12）：通道抽象统一与 Redis 定位收敛
+
+- 新增 `internal/eventbus/channel` 作为任务与结果的唯一节点通信抽象：Send/Subscribe 与能力声明
+  （单向 publish/subscribe、半双工 request/reply、全双工 stream）；RPC、gRPC stream 与 Redis
+  list/zset/stream/pubsub 都只是它的实现，同步与异步的差别仅是该抽象的不同 channel 实现；
+- `runtime`/`collector` 经订阅 EventBus 获取结果集；调度节点与执行节点之间的结果归集由
+  eventbus 承载（默认 gRPC 双向 stream，可替换为 Redis pub/sub、list 等），不再由结果通道
+  类型决定状态机；
+- Redis 收敛为不可靠传输实现：不以 AOF、PEL、XACK 或任何 Redis 状态作为正确性前提，异步通道
+  仅确认「已尝试发送」，结果由执行节点另行发布 ResultEvent；
+- 撤回 v3.18 引入的 tenant：本期不引入 tenant，`idempotency_key` 由接入方保证全实例唯一
+  （`task_identities` 幂等账本保留）；
+- 异步链路由 Redis Streams consumer group 回到「通道无差别可替换」：可靠投递不再由 Redis 提供，
+  全部由 PG 认领、终态与 R1–R5 对账收敛。
+
+## v3.18（2026-09-11）：可靠投递与控制面正确性收敛
+
+- 业务接入从“直写任务表组”收敛为同一本地事务调用 `enqueue_tasks` SQL 函数；引入 tenant 与
+  `task_identities`，以跨阶段的稳定幂等账本替代热表扫描和局部唯一索引，并以最小 DB 权限保护内部表；
+- 异步链路从 Redis LIST/BRPOP 切换为 Redis Streams consumer group（PEL、XACK、XAUTOCLAIM），
+  `inprocess` 明确降级为执行租约视图，不再称为共识；Redis v1 基线提升至 6.2+；
+- 外部选举保留，但新增 PG `control_leases` 单调 epoch fence；并发限制改为 claim 事务中的
+  `concurrency_reservations` 条件预留，容忍故障切换和短暂双主；
+- 统一 attempts 语义：仅 CLAIM 加一，重试/R1 重置不加；`sync/async` 改称 `direct/queue` 投递模式，
+  创建方始终查询结果；对账扩展为 R1–R5（新增名额账本修复）。
+
 ## v3.17（2026-09-11）：控制面运行时归组目录更名
 
 - `internal/controller/` 更名 `internal/runtime/`（目录名对齐「运行时」归组语义；

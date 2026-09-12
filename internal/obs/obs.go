@@ -1,10 +1,13 @@
-// Package obs 集中定义 §6.5 最小指标集（单一采集标准 = OpenTelemetry）。
-// 各角色包只依赖注入的 *obs.Metrics，不感知导出协议；未启用 OTel 时 instruments 为
-// no-op，零开销。标签纪律：只允许低基数标签（priority、type 白名单、node_id、outcome、
-// reason）；task_id/业务 key 禁止入标签。
+// Package obs 集中定义 §6.4 最小指标集（单一采集标准 = OpenTelemetry）。各角色包只依赖
+// 注入的 *obs.Metrics，不感知导出协议；未启用 OTel 时 instruments 为 no-op，零开销。
 //
-// 水位型指标（queue.depth 等）设计稿定为 ObservableGauge；实现采用同步 Int64Gauge——
-// 采集点位收敛在既有写路径（§6.5），在测量点直接记录，语义相同且免去回调装配。
+// 标签纪律（§6.4）：只允许低基数标签（channel 名、duplex、kind、outcome、reason、scope、
+// type 白名单）；task_id / idempotency_key 一律禁止入标签。通信面指标（eventbus.*）只描述
+// 通道行为，不作为任务正确性来源——正确性信号来自 PG（对账重置、名额与控制 fence 拒绝），
+// 因为通道本身被设计为可丢失、可重复（§1.2.1、§9.3）。
+//
+// 水位型指标（wal.backlog、concurrency.reservations）设计稿定为 ObservableGauge；实现采用
+// 同步 Int64Gauge——采集点位收敛在既有写路径，在测量点直接记录，语义相同且免去回调装配。
 package obs
 
 import (
@@ -15,33 +18,29 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// Metrics stateflux 全框架指标集（§6.5 最小指标集）。
+// Metrics stateflux 全框架指标集（§6.4 最小指标集）。
 type Metrics struct {
 	meter metric.Meter
 
-	// stateflux.queue.depth —— 调度：各就绪队列深度（LLEN）。
-	QueueDepth metric.Int64Gauge
-	// stateflux.inprocess.size —— 调度/对账：共识集合大小（ZCARD）。
-	InprocessSize metric.Int64Gauge
-	// stateflux.claim.to_deliver_latency —— 调度：claim→投递延迟。
-	ClaimToDeliver metric.Float64Histogram
-	// stateflux.collect.latency —— Collector：结果完成→终态落库（归集延迟）。
-	CollectLatency metric.Float64Histogram
-	// stateflux.reconcile.resets —— 对账：R1 重置次数（核心健康信号）。
+	// stateflux.eventbus.send —— 通信面：发送尝试数（channel / duplex 标签）。
+	EventBusSend metric.Int64Counter
+	// stateflux.eventbus.subscribe —— 通信面：订阅建立数（channel / duplex 标签）。
+	EventBusSubscribe metric.Int64Counter
+	// stateflux.eventbus.errors —— 通信面：发送、订阅与投递错误数（channel / kind 标签）。
+	EventBusErrors metric.Int64Counter
+	// stateflux.collector.results —— Collector：归集事件数（outcome 标签）。
+	CollectorResults metric.Int64Counter
+	// stateflux.reconcile.resets —— 对账：R1/R3/R5 重置次数（reason 标签，核心健康信号）。
 	ReconcileResets metric.Int64Counter
-	// stateflux.inprocess.rejects —— queue：注册拒绝数（§6.2 双防线命中）。
-	InprocessRejects metric.Int64Counter
-	// stateflux.tasks.terminal —— Collector：终态计数（succeeded/failed/dead）。
-	TasksTerminal metric.Int64Counter
-	// stateflux.wal.backlog —— Executor：WAL 未 Ack 条数/字节数（反压水位）。
+	// stateflux.control.fence_rejects —— 控制面/归集：陈旧 epoch 或 attempt 的拒绝数（kind 标签）。
+	ControlFenceRejects metric.Int64Counter
+	// stateflux.wal.backlog.entries/.bytes —— worker：WAL 未确认条数与字节数（反压水位）。
 	WALBacklogEntries metric.Int64Gauge
 	WALBacklogBytes   metric.Int64Gauge
-	// stateflux.executor.free_slots —— Executor：容量上报。
-	FreeSlots metric.Int64Gauge
-	// stateflux.handler.duration —— Executor：handler 耗时。
+	// stateflux.handler.duration —— worker：handler 耗时（type 标签）。
 	HandlerDuration metric.Float64Histogram
-	// stateflux.stage.size —— 各阶段表规模（可选观测）。
-	StageSize metric.Int64Gauge
+	// stateflux.concurrency.reservations —— 调度：在途并发名额（scope 标签）。
+	ConcurrencyReservations metric.Int64Gauge
 }
 
 // New 创建指标集（otel.Meter 经 config 装配的全局 MeterProvider 解析；未启用 OTel 时为 no-op）。
@@ -51,17 +50,20 @@ func New() (*Metrics, error) {
 	instruments := []struct {
 		mk func(metric.Meter) error
 	}{
-		{func(mm metric.Meter) (err error) { m.QueueDepth, err = mm.Int64Gauge("stateflux.queue.depth"); return }},
 		{func(mm metric.Meter) (err error) {
-			m.InprocessSize, err = mm.Int64Gauge("stateflux.inprocess.size")
+			m.EventBusSend, err = mm.Int64Counter("stateflux.eventbus.send")
 			return
 		}},
 		{func(mm metric.Meter) (err error) {
-			m.ClaimToDeliver, err = mm.Float64Histogram("stateflux.claim.to_deliver_latency", metric.WithUnit("s"))
+			m.EventBusSubscribe, err = mm.Int64Counter("stateflux.eventbus.subscribe")
 			return
 		}},
 		{func(mm metric.Meter) (err error) {
-			m.CollectLatency, err = mm.Float64Histogram("stateflux.collect.latency", metric.WithUnit("s"))
+			m.EventBusErrors, err = mm.Int64Counter("stateflux.eventbus.errors")
+			return
+		}},
+		{func(mm metric.Meter) (err error) {
+			m.CollectorResults, err = mm.Int64Counter("stateflux.collector.results")
 			return
 		}},
 		{func(mm metric.Meter) (err error) {
@@ -69,11 +71,7 @@ func New() (*Metrics, error) {
 			return
 		}},
 		{func(mm metric.Meter) (err error) {
-			m.InprocessRejects, err = mm.Int64Counter("stateflux.inprocess.rejects")
-			return
-		}},
-		{func(mm metric.Meter) (err error) {
-			m.TasksTerminal, err = mm.Int64Counter("stateflux.tasks.terminal")
+			m.ControlFenceRejects, err = mm.Int64Counter("stateflux.control.fence_rejects")
 			return
 		}},
 		{func(mm metric.Meter) (err error) {
@@ -85,14 +83,13 @@ func New() (*Metrics, error) {
 			return
 		}},
 		{func(mm metric.Meter) (err error) {
-			m.FreeSlots, err = mm.Int64Gauge("stateflux.executor.free_slots")
-			return
-		}},
-		{func(mm metric.Meter) (err error) {
 			m.HandlerDuration, err = mm.Float64Histogram("stateflux.handler.duration", metric.WithUnit("s"))
 			return
 		}},
-		{func(mm metric.Meter) (err error) { m.StageSize, err = mm.Int64Gauge("stateflux.stage.size"); return }},
+		{func(mm metric.Meter) (err error) {
+			m.ConcurrencyReservations, err = mm.Int64Gauge("stateflux.concurrency.reservations")
+			return
+		}},
 	}
 	for _, ins := range instruments {
 		if err := ins.mk(meter); err != nil {
@@ -104,48 +101,40 @@ func New() (*Metrics, error) {
 
 // ---- 录制辅助（低基数标签在此收敛） ----
 
-// QueueDepthRecord 各优先级队列深度。
-func (m *Metrics) QueueDepthRecord(ctx context.Context, priority string, v int64) {
-	if m.QueueDepth != nil {
-		m.QueueDepth.Record(ctx, v, metric.WithAttributes(attribute.String("priority", priority)))
+// SendRecord 通道发送尝试（channel 名 + 双工形态；best-effort，不代表送达）。
+func (m *Metrics) SendRecord(ctx context.Context, channelName, duplex string) {
+	if m.EventBusSend != nil {
+		m.EventBusSend.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("channel", channelName),
+			attribute.String("duplex", duplex),
+		))
 	}
 }
 
-// InprocessSizeRecord 共识集合大小。
-func (m *Metrics) InprocessSizeRecord(ctx context.Context, v int64) {
-	if m.InprocessSize != nil {
-		m.InprocessSize.Record(ctx, v)
+// SubscribeRecord 通道订阅建立。
+func (m *Metrics) SubscribeRecord(ctx context.Context, channelName, duplex string) {
+	if m.EventBusSubscribe != nil {
+		m.EventBusSubscribe.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("channel", channelName),
+			attribute.String("duplex", duplex),
+		))
 	}
 }
 
-// WALBacklogRecord WAL 未 Ack 条数/字节数。
-func (m *Metrics) WALBacklogRecord(ctx context.Context, entries, bytes int64) {
-	if m.WALBacklogEntries != nil {
-		m.WALBacklogEntries.Record(ctx, entries)
-	}
-	if m.WALBacklogBytes != nil {
-		m.WALBacklogBytes.Record(ctx, bytes)
-	}
-}
-
-// FreeSlotsRecord 执行节点剩余并发槽（node_id 标签）。
-func (m *Metrics) FreeSlotsRecord(ctx context.Context, nodeID string, v int64) {
-	if m.FreeSlots != nil {
-		m.FreeSlots.Record(ctx, v, metric.WithAttributes(attribute.String("node_id", nodeID)))
+// ErrorRecord 通道错误（kind ∈ send/subscribe/deliver/connect）。
+func (m *Metrics) ErrorRecord(ctx context.Context, channelName, kind string) {
+	if m.EventBusErrors != nil {
+		m.EventBusErrors.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("channel", channelName),
+			attribute.String("kind", kind),
+		))
 	}
 }
 
-// TerminalCount 终态计数（outcome 标签）。
-func (m *Metrics) TerminalCount(ctx context.Context, outcome string) {
-	if m.TasksTerminal != nil {
-		m.TasksTerminal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", outcome)))
-	}
-}
-
-// RejectCount 注册拒绝计数（kind ∈ tombstone/attempt）。
-func (m *Metrics) RejectCount(ctx context.Context, kind string) {
-	if m.InprocessRejects != nil {
-		m.InprocessRejects.Add(ctx, 1, metric.WithAttributes(attribute.String("kind", kind)))
+// CollectorResultRecord 归集事件数（outcome ∈ succeeded/failed/dead/stale）。
+func (m *Metrics) CollectorResultRecord(ctx context.Context, outcome string, n int64) {
+	if n > 0 && m.CollectorResults != nil {
+		m.CollectorResults.Add(ctx, n, metric.WithAttributes(attribute.String("outcome", outcome)))
 	}
 }
 
@@ -156,9 +145,33 @@ func (m *Metrics) ResetCount(ctx context.Context, reason string, n int64) {
 	}
 }
 
+// FenceRejectCount 陈旧 epoch / attempt 拒绝计数（kind ∈ control_epoch/attempt）。
+func (m *Metrics) FenceRejectCount(ctx context.Context, kind string, n int64) {
+	if n > 0 && m.ControlFenceRejects != nil {
+		m.ControlFenceRejects.Add(ctx, n, metric.WithAttributes(attribute.String("kind", kind)))
+	}
+}
+
+// WALBacklogRecord WAL 未确认条数/字节数。
+func (m *Metrics) WALBacklogRecord(ctx context.Context, entries, bytes int64) {
+	if m.WALBacklogEntries != nil {
+		m.WALBacklogEntries.Record(ctx, entries)
+	}
+	if m.WALBacklogBytes != nil {
+		m.WALBacklogBytes.Record(ctx, bytes)
+	}
+}
+
 // HandlerDurationRecord handler 耗时（type 标签；调用方保证类型白名单）。
 func (m *Metrics) HandlerDurationRecord(ctx context.Context, seconds float64, taskType string) {
 	if m.HandlerDuration != nil {
 		m.HandlerDuration.Record(ctx, seconds, metric.WithAttributes(attribute.String("type", taskType)))
+	}
+}
+
+// ReservationsRecord 在途并发名额（scope 标签；由 PG 权威值投影，不是独立账本）。
+func (m *Metrics) ReservationsRecord(ctx context.Context, scope string, v int64) {
+	if m.ConcurrencyReservations != nil {
+		m.ConcurrencyReservations.Record(ctx, v, metric.WithAttributes(attribute.String("scope", scope)))
 	}
 }

@@ -1,99 +1,68 @@
 # stateflux 设计 · 数据模型与状态机（§3–§4）
 
-> v3.16（2026-09-10）。§ 编号全库沿用，文件映射见 [README](./README.md)。
+> v3.19（2026-09-12）。§ 编号全库沿用，文件映射见 [README](./README.md)。
 
 ## 3. 数据模型
 
-### 3.1 任务存储模型（逻辑阶段集合 + PG 默认实现）
+### 3.1 PG 任务账本
 
-生命周期四阶段首先是**逻辑抽象**：Pending / Schedulable / Processing / Completed 四个阶段集合，
-由 `internal/domain` 以聚合接口暴露（创建入集、约束晋升、认领挪行、终态搬移、对账扫描；
-Task/Result/Ops 三个聚合接口 + 组合根 Store，§8）。**PG 四阶段
-分区表 + payload 分离表是该接口的默认实现**，整体可替换（如退回单表 + 状态列）而不改变调度与
-执行语义；下文沿用表名指代各逻辑阶段。默认实现中，生命周期阶段由**所在表**表达（`status` 列
-取消），四张阶段表共享同一套核心字段：
+四阶段 Pending / Schedulable / Processing / Completed 是 `internal/domain` 暴露的逻辑集合，PG 四张
+阶段表为默认实现。业务在自己的本地事务内调用 `stateflux.enqueue_tasks(...)`；业务 role 仅有该函数
+的 EXECUTE 权限与结果查询权限，内部表只由服务账号写入。
 
-`id`（雪花）、`type`、`priority`、`exec_mode`（sync/async）、`run_at`（最早可调度时间，承载
-延迟/重试退避）、`timeout_ms`、`max_attempts`/`attempts`、`owner_node`、`error`（终态错误
-摘要，完整结果在 `task_results`）、`idempotency_key`（业务幂等键）、`batch_id`（批量创建归组）、
-`callback`（jsonb，OnSuccess/OnError 回调规格，§5.8）、`parent_task_id`（回调派生溯源）、时间戳。
+任务行包含 `id`、`type`、`priority`、`channel`、`run_at`、`timeout_ms`、`max_attempts/attempts`、
+`attempt`、`owner_node`、`control_epoch`、`idempotency_key`、`callback`、`parent_task_id` 与时间戳。
+项目暂不引入 tenant：`idempotency_key` 在整个 stateflux 实例内唯一，接入方必须使用全局唯一前缀。
 
-| 表 | 语义 | 要点 |
-| --- | --- | --- |
-| `task_payloads` | payload 分离表：`task_id` + `payload`（jsonb） | 阶段表查询面不背 payload；终态搬移时合并入 completed 后删除 |
-| `pending_tasks` | 已创建，等待调度预处理 | 约束晋升的扫描对象（§5.2） |
-| `schedulable_tasks` | 就绪可调度（逻辑就绪集），量级显著小于 pending | 调度认领的扫描对象；可调度性由并发约束与业务约束在晋升时判定 |
-| `processing_tasks` | 已调度（在队列/inprocess/分发协程中） | 认领与**重试逻辑**所在；已入本表的任务不可取消 |
-| `completed_tasks` | 统一历史表，`outcome ∈ {succeeded, failed, dead}` | 内联 payload（便于排查），**不内联 result**（完整结果在 `task_results`，行内仅留 error 摘要）；按 `created_at` 分区 + detach 归档 |
-| `task_results` | 结果集：`task_id` 主键 + `outcome`/`attempt`/`result`（jsonb）/`error`/`completed_at` | 终态事务内**一次性写入、不可变**；业务结果的保留期与 completed 归档策略**解耦**（独立 TTL/分区）；大 result 同 payload 规则（>64KB 走对象存储引用） |
-
-- **每任务全生命周期约 5 次批量行操作**：INSERT pending → 约束晋升挪 schedulable → 认领挪
-  processing（attempts+1）→ 终态事务双行（completed 行含 payload 合并 + task_results 行）。
-  行操作全部批量化，换取热表小、扫描快、历史天然分离（§9.2、§10）。
-- 认领 = `schedulable_tasks` → `processing_tasks` 的单条 `UPDATE ... WHERE id IN (SELECT ...
-  FOR UPDATE SKIP LOCKED)` 挪行，查询与迁移原子完成，天然防重复认领；终态搬移**attempt 匹配
-  才生效**，重复搬移无副作用（幂等）。
-- 超过 `max_attempts` 记 `dead`（outcome），进 completed_tasks 便于排查。
-- 索引：pending 晋升扫描 `(priority DESC, run_at)`；schedulable 认领部分索引；processing 对账
-  `(updated_at)`；completed 查询 `(type, created_at)`。
-- 幂等键唯一性需覆盖非终态三表（实施阶段给出方案：创建时查重 + 各表局部唯一索引）。
-- `task_results` 与终态搬移同事务写入（INSERT ... ON CONFLICT DO NOTHING，冲突即重复归集、
-  跳过），写入后不可变；结果查询先查本表，未命中再查阶段表判断在途状态（§5.6）。
-- 大 payload（>64KB）不入库，业务方写对象存储后传引用。
-- **实现载体 = ent**：六张表以 ent schema（entgo.io/ent）定义为代码，迁移由代码生成；认领挪行、
-  终态事务、`ON CONFLICT DO NOTHING` 等并发关键路径以 ent 原生 SQL 下沉（Modify/raw），不依赖
-  ORM 生成的隐式语句；常规读写走 ent 生成的类型安全 API。业务直写接入（§5.1）不受影响——业务方
-  仍可用任意客户端直写任务表组，ent schema 只约束框架侧实现。
-
-### 3.2 Redis 结构
-
-| key | 结构 | 用途 |
-| --- | --- | --- |
-| `stateflux:queue:{pri}` | LIST | 异步就绪队列，默认按 high/normal/low 三级拆分；消息体 = proto TaskMessage（内联完整任务，§3.3） |
-| `stateflux:inprocess` | ZSET | 共识集合：member=task_id，score=租约到期时间 |
-| `stateflux:inprocess:detail` | HASH | member → {node_id, attempt, started_at}，归属校验与观测 |
-| `stateflux:done:{task_id}` | STRING | 终态墓碑，TTL 自动回收 |
-| `stateflux:node:{node_id}` | HASH | 执行节点容量上报（free_slots），供选节点与观测 |
-
-**inprocess 集合的共识语义**（正确性核心）：
-
-- 成员定义：**已被认领、但尚未在 PG 落终态的任务**（执行中 + 执行完但结果未归集）。
-- 集合操作全部原子且带归属校验：注册时检查墓碑与已有成员（重复投递/陈旧副本被拒绝），续约与移除
-  要求 node_id + attempt 匹配——僵尸节点无法覆盖新尝试的记录。
-- Redis 全量丢失可由对账从 PG 重建；重建后正在执行的任务可能被重复派发，由 at-least-once + 业务幂等收敛。
-
-### 3.3 消息载体（proto TaskMessage）
-
-跨节点传输的任务载体由 protobuf 统一定义（`api/stateflux/task/v1`，**proto3 语法**），字段借鉴
-Machinery 的 `Signature`（UUID/Name/ETA/Priority/Headers）并适配本框架；内部（dispatch）与外部
-（cluster）契约统一 proto3，可选字段（如 `trace_headers`）用 `optional` 显式表达存在性：
-
-| 字段 | 说明 |
+| 表 | 用途 |
 | --- | --- |
-| `task_id` | 雪花 ID，与 PG 行对应 |
-| `attempt` | fencing token，执行侧注册与回写校验的依据 |
-| `type` / `payload` | 任务类型与载荷 |
-| `priority` / `timeout_ms` / `deadline` | 执行控制 |
-| `trace_headers` | 链路追踪传播（Machinery Headers 同款用途） |
+| `task_identities` | `idempotency_key → task_id` 的跨阶段身份账本；dedupe 窗口内重复创建返回原 ID。 |
+| `task_payloads` | 在途 payload；终态时合并入 completed。 |
+| `pending_tasks` / `schedulable_tasks` / `processing_tasks` / `completed_tasks` | 四阶段集合。 |
+| `task_results` | `task_id` 主键的不可变终态结果。 |
+| `concurrency_reservations` | `scope_key` 的在途计数与上限；claim 时条件预留，终态/重置时释放。 |
+| `control_leases` | 控制面 scope 的 owner、expiry、单调 epoch；外部选举只提供候选资格。 |
 
-- **内联完整任务**：任务创建后 payload 不可变，消息内联安全；大 payload（>64KB）本就走对象存储
-  引用。执行侧 BRPOP 后零 PG 读，Redis 消息是「可执行的认领凭证」，PG 仍是状态与 payload 的
-  唯一权威。
-- **sync/async 统一载体**：异步队列 LPUSH 与同步 `Execute` RPC 请求共用同一信封，减少重复定义、
-  便于统一注入 trace 与 attempt 语义。
+claim 是一个 PG 事务：验证当前 control epoch → `SKIP LOCKED` 选候选 → 条件预留名额 →
+`schedulable → processing` → `attempts + 1`。attempt 是执行 fence，**只在 claim 加一**；重试/R1
+重置不加。终态、重置和死信验证 attempt，终态操作验证当前 control lease。前置条件只能读取不变任务
+字段或受限快照，不得 I/O 或写状态。
 
-## 4. 状态机与投递语义
+### 3.2 EventBus 与 Channel
+
+`internal/eventbus` 是任务和结果的统一通信面：`task.{priority}` 与 `result` 是逻辑 topic；它支持
+`Send`（发布）和 `Subscribe`（订阅）。EventBus 不承诺持久化、至少一次或恰一次；调用者必须接受
+**丢失、重复、乱序，以及“返回发送失败但实际已送达”**。PG processing + timeout/grace + 对账是唯一
+恢复机制。
+
+`internal/eventbus/channel` 定义能力而非绑定中间件：
+
+| channel 能力 | 语义 | 实现例子 |
+| --- | --- | --- |
+| 单向 publish/subscribe | 发送不带结果；订阅端随后发布 ResultEvent | Redis pub/sub、list、zset、stream |
+| 半双工 request/reply | 先发送请求、再读取一个结果；调用方阻塞等待 | unary RPC、Redis list 组合 |
+| 全双工 stream | 两端可并发 Send/Subscribe；适合长连接结果汇聚 | gRPC bidirectional stream、Redis pub/sub |
+
+每个实现声明 `ChannelCapabilities`（是否订阅、是否请求应答、是否全双工、是否提供本地 ack）。ack 是
+实现级流控信号，**永不构成任务可靠性条件**。Redis 的 list/zset/stream/pubsub 可全部实现 channel；即使
+某实现有 AOF、PEL 或 XACK，框架也不依赖它们。默认结果 channel 是调度节点和执行节点之间的 gRPC
+双向 stream：worker 发布 `ResultEvent`，Collector 订阅；它可替换成 Redis channel 而不改变状态机。
+
+### 3.3 信封
+
+`api/stateflux/task/v1` 定义不可变 `TaskMessage`（task_id、attempt、type、payload、priority、deadline、
+trace_headers、control_epoch）和 `ResultEvent`（task_id、attempt、outcome、result/error、source）。
+同步 RPC channel 的响应适配为 `ResultEvent` 并送入同一 EventBus；异步 channel 的 `Send` 只表示已尝试
+发送，结果必须由执行节点另行发布。大 payload/result 使用对象存储引用。
+
+## 4. 状态机与可靠性
 
 ```
-pending_tasks ──约束晋升(§5.2)──▶ schedulable_tasks ──认领(CLAIM, attempts+1)──▶ processing_tasks
-                                      ▲      │  终态搬移(§5.5, attempt 校验)   │        │
-                                      │      └─重试/R1重置(attempt+1, 退避)──┘        ├─▶ completed_tasks{succeeded / failed}
-                                      │                                              └─attempts 耗尽─▶ completed_tasks{dead}
+pending → schedulable → processing ──ResultEvent（attempt 匹配）→ completed
+               ▲              │
+               └─ retry / R1 ─┘  （不加 attempts；下次 claim 才 +1）
 ```
 
-- 投递语义 **at-least-once**：BRPOP 后注册前宕机、Redis 丢数据重建、终态搬移前执行节点宕机等窗口
-  都会导致重复执行，业务 handler 必须按 `idempotency_key`（或 task_id + attempt）幂等。
-- `processing_tasks` 中的任务表示「已认领」；任务此刻在队列里、inprocess 里、或同步分发协程中，
-  精确位置以 Redis 为准。
-- 取消边界：仅 `pending_tasks` / `schedulable_tasks` 中的任务可取消（v2 提供），已入
-  `processing_tasks` 不可取消。
+Channel 故障、Redis 丢失、RPC 超时或结果事件丢失都只会让 processing 在 grace 后重置并重跑；业务 handler
+必须按 `idempotency_key` 或 task_id 保证副作用幂等。Redis 仅缩短正常路径延迟，完全不可用时框架仍由
+PG 对账收敛。

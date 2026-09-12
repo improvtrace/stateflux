@@ -14,7 +14,7 @@ message ClusterInfoRequest {}
 message NodeInfo {
   // 节点唯一 ID（集群内稳定）。
   string node_id = 1;
-  // gRPC 服务地址（host:port），供 Execute/Collect 调用。
+  // gRPC 服务地址（host:port），供 Execute / ResultStream 调用。
   string address = 2;
   // 本节点承担的角色：biz / executor(worker) / scheduler / collector 等。
   repeated string roles = 3;

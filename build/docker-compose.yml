@@ -1,5 +1,6 @@
-# 本地开发中间件栈：PostgreSQL（任务表组，唯一权威）+ Redis（实时视图）。
-# 生产环境请自备 HA 实例（README「准备中间件」）；本文件仅服务本地开发与冒烟。
+# 本地开发中间件栈：PostgreSQL（任务表组，唯一权威）+ Redis（任务/结果通道，best-effort
+# 传输实现）。Redis 的持久化、复制与确认语义都不构成 stateflux 的正确性前提（§9.2）。
+# 生产环境请自备实例；本文件仅服务本地开发与冒烟。
 # 启停：hack/dev.sh up / hack/dev.sh down
 services:
   postgres:

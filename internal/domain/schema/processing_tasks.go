@@ -8,8 +8,9 @@ import (
 )
 
 // ProcessingTask holds the schema definition for the ProcessingTask entity.
-// processing_tasks：已调度（在队列/inprocess/同步分发协程中，精确位置以 Redis 为准，§4）——
-// 认领与重试逻辑所在；已入本表的任务不可取消（§4）。
+// processing_tasks：已认领、在途执行——认领与重试逻辑所在；任务是否在途只由本表决定，
+// 任何 channel（RPC/Redis）的投递状态都不改变这一事实（通道可丢失、可重复，收敛由
+// R1–R5 对账完成，§4）。已入本表的任务不可取消。
 type ProcessingTask struct {
 	ent.Schema
 }

@@ -11,7 +11,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/stateflux ./cmd/st
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/stateflux /stateflux
-# 7000 = 业务接入 gRPC（api），7001 = 内部 gRPC（Execute/Collect，集群可见）
+# 7000 = 业务接入 gRPC（api），7001 = 内部 gRPC（Execute / ResultStream，集群可见）
 EXPOSE 7000 7001
 USER nonroot
 ENTRYPOINT ["/stateflux"]
