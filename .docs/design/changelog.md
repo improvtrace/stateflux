@@ -2,6 +2,27 @@
 
 > 当前版本见 [README](./README.md)；各主题文件头部标注所对应的版本。
 
+## v3.20（2026-09-12）：调度约束字段、数值枚举与注释
+
+- 任务行新增两个**业务无关的调度约束**字段：`vpc`（目标网络域）与 `node`（期望执行节点），创建时
+  指定、空串表示不限；由调度侧在晋升与认领时过滤，执行侧不参与决策（§3.1/§5.2/§5.3）；与
+  `owner_node`（实际认领节点）语义区分，重派时 `node` 不变；
+- 枚举与取值区间：`priority` 改为 **0–100 连续区间**（Int8，默认 50，越大越优先，由各表 CHECK 约束
+  钉住区间）——它不是枚举，业务可自行细分语义，调度只依赖排序；`outcome` 保持**数值封闭枚举**
+  1=succeeded / 2=failed / 3=dead（0 保留为未设置，使零值与漏赋值可检测）。`vpc`/`node` 是外部标识的
+  自由文本（VPC 名与节点 ID），**不是枚举、不做数值编码**。编码定义在 `internal/domain/schema`
+  （ent 生成码反向 import 本包，故枚举常量不得下沉到 domain，避免成环）；
+- 任务 topic 随 priority 区间化改为**档位**：`task.{band}`（low 0–33 / normal 34–66 / high 67–100），
+  避免连续值产生上百个 topic；档位只决定订阅与投递分组，精确优先顺序仍由 PG 的 `priority` 排序决定
+  （§3.2/§5.2）；
+- 任务行新增 `operator` 与 `group`：`operator` 是 `type` 的**子类型**（type 粗、operator 细，二者共同
+  决定 handler 选择与路由，新增子操作不必新增 type）；`group` 是**业务分组键**，供上层业务按组查询/
+  聚合，框架只建索引、不解释语义、不参与调度正确性，并与 `batch_id`、并发 `scope_key` 显式区分；
+  四张阶段表的 `group` 各建普通索引；
+- 表结构自描述：所有列带注释并由 ent 写进 DDL（`entsql.WithComments`）；ent v0.14.6 不支持**表级**
+  注释，表注释由迁移引导 DDL 补齐（新增 `internal/domain/migration/table_comments.sql`）；
+- 四阶段表字段集保持一致（无 mixin，各 model 独立定义）：新增列或改枚举必须四处同步。
+
 ## v3.19（2026-09-12）：通道抽象统一与 Redis 定位收敛
 
 - 新增 `internal/eventbus/channel` 作为任务与结果的唯一节点通信抽象：Send/Subscribe 与能力声明
@@ -16,6 +37,26 @@
   （`task_identities` 幂等账本保留）；
 - 异步链路由 Redis Streams consumer group 回到「通道无差别可替换」：可靠投递不再由 Redis 提供，
   全部由 PG 认领、终态与 R1–R5 对账收敛。
+
+### v3.19 一致性修订（评审后，无设计语义变更）
+
+- 修正全库 § 交叉引用：原指代 SKIP LOCKED、factory/callback、观测、Handler 注册、死信运维、attempt
+  语义与结果表不变性的失效或不符引用，全部改为实际出处（§3.1、§5.6、§6.4、§1.2.8、§6.2、§9.6、
+  §5.5）；文档与 Go 注释同步；
+- 术语统一：明确 `attempts`（已认领次数）与 `attempt`（本次 fence 值）的关系，任务行字段表去掉
+  重复的 `attempt`；`handler timeout` 统一为任务级执行预算 `timeout_ms`（默认 60s，与任务行一致），
+  删除与 R1 的 `max(timeout, dispatch_grace)` 公式冲突的「必须小于 grace」表述；
+- `inprocess` 命名随可靠性收敛撤回：Redis 侧只保留 `domain/cacheview` 容量提示视图（非正确性
+  路径），§5.4 与 R2 措辞同步；
+- 补齐此前未定义的表述：墓碑 = `task_results` 的 `task_id` 主键终态行；`batch_id` 的工厂孤儿判定
+  用途写入 §5.6；`control_epoch` 明确为诊断字段、不参与校验；
+- §6.4 指标名与实现对齐（统一 `stateflux.` 前缀、`wal.backlog` 拆分为 `.entries`/`.bytes`、
+  水位型指标为同步 Int64Gauge）；README 索引描述改为与实际内容一致；
+- §8.1 标注为历史记录并修正验证步骤（`make test` 目标不存在，改为 build/vet + demo 冒烟）；
+  §12 增补当前进度与骨架差异；实施前必须定稿的待定项集中于 §14.6–§14.13；
+- 任务表 schema 对齐本文档：四阶段表移除 v3.18 遗留的 `exec_mode`(sync/async)、改为**非空**
+  `channel`（`internal/domain/schema`，ent 生成码同步重生成）——列上只记录逻辑 channel 名，同步与
+  异步由被解析 channel 的能力推导（§3.2、§14.1）；默认 channel 在装配/配置层补齐，故不设列默认值。
 
 ## v3.18（2026-09-11）：可靠投递与控制面正确性收敛
 
@@ -51,7 +92,7 @@
   retry.go/snowflake.go）；
 - `factory`/`queue`/`dispatch` 收拢至 `internal/task/`（任务运行时归组）；
 - 仓储读写全面改走 ent 类型安全 API（CreateBulk + OnConflict upsert、FOR UPDATE 行锁承载
-  attempt fencing），仅认领挪行（§9.1 SKIP LOCKED 单条 SQL）与迁移引导 DDL 保留原生执行；
+  attempt fencing），仅认领挪行（§3.1 SKIP LOCKED 单条 SQL）与迁移引导 DDL 保留原生执行；
 - 测试代码清空（后续按需重建，§8）。
 
 ## v3.14（2026-09-10）：domain 四层完整落地
@@ -73,7 +114,7 @@
 
 ## v3.11（2026-09-10）：布局微调：sdk 提升为顶层公开包
 
-Task/Handler 契约类型是执行接入（§7）的稳定依赖面，公开以支撑构建时注册与 v2 执行接入演进
+Task/Handler 契约类型是执行接入（§1.2.8）的稳定依赖面，公开以支撑构建时注册与 v2 执行接入演进
 （§14 遗留）；新增 `build/`（服务镜像 + 本地中间件编排）与 `hack/`（开发脚本）。
 （sdk 公开状态后于 v3.15 收回。）
 
@@ -86,12 +127,12 @@ Task/Handler 契约类型是执行接入（§7）的稳定依赖面，公开以�
 ## v3.9（2026-09-10）：定位修订：独立服务，而非三方框架库
 
 §1.2.8 重写为「服务优先」，移除嵌入形态承诺；`sdk/` 从「业务方唯一依赖面」调整为引擎共享内核；
-执行逻辑经 Handler 在服务构建时注册（§7/§8）。
+执行逻辑经 Handler 在服务构建时注册（§1.2.8/§8）。
 
 ## v3.8（2026-09-09）：技术栈约定
 
 数据库操作统一走 ent（entgo.io/ent，Kratos 官方集成指南推荐的 ORM，§3.1）、proto 契约统一
-proto3（§3.3）、观测采用 OpenTelemetry 指标采集（§6.5）。
+proto3（§3.3）、观测采用 OpenTelemetry 指标采集（§6.4）。
 
 ## v3.7：结果集设计
 
@@ -103,5 +144,5 @@ WAL（append-only 磁盘日志、Ack 水位截断、重启重放、高水位反�
 - v3.6：阶段集合逻辑抽象、PG 分区表为默认实现（§3.1）；
 - v3.5：调度侧集权/执行侧无状态（§1.2.7）；
 - v3.4：调度预处理层（§5.2）；
-- 更早：Machinery callback（§5.8）、TaskMessage（§3.3）、创建双模式（§5.1，v3.16 移除 RPC 模式）、
-  TaskFactory（§5.7）、目录平铺 + sdk/（§8）。
+- 更早：Machinery callback（§5.6）、TaskMessage（§3.3）、创建双模式（§5.1，v3.16 移除 RPC 模式）、
+  TaskFactory（§5.6）、目录平铺 + sdk/（§8）。

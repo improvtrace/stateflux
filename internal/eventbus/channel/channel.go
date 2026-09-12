@@ -68,7 +68,7 @@ func (c Capabilities) Duplex() Duplex {
 	}
 }
 
-// Topic 是逻辑主题（§3.2）：任务为 task.{priority}，结果为 result。
+// Topic 是逻辑主题（§3.2）：任务为 task.{band}（band 由数值 priority 分档得出），结果为 result。
 type Topic string
 
 // Envelope 是通道载荷的通用外形（§3.3）。业务语义由 api/stateflux/task/v1 的

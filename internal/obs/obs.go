@@ -6,8 +6,8 @@
 // 通道行为，不作为任务正确性来源——正确性信号来自 PG（对账重置、名额与控制 fence 拒绝），
 // 因为通道本身被设计为可丢失、可重复（§1.2.1、§9.3）。
 //
-// 水位型指标（wal.backlog、concurrency.reservations）设计稿定为 ObservableGauge；实现采用
-// 同步 Int64Gauge——采集点位收敛在既有写路径，在测量点直接记录，语义相同且免去回调装配。
+// 水位型指标（wal.backlog、concurrency.reservations）采用同步 Int64Gauge——采集点位收敛在既有
+// 写路径，在测量点直接记录，语义与 ObservableGauge 相同且免去回调装配（§6.4）。
 package obs
 
 import (

@@ -1,6 +1,6 @@
 # stateflux 设计 · 四阶段流程（§5）
 
-> v3.19（2026-09-12）。§ 编号全库沿用，文件映射见 [README](./README.md)。
+> v3.20（2026-09-12）。§ 编号全库沿用，文件映射见 [README](./README.md)。
 
 ## 5. 四阶段流程
 
@@ -12,13 +12,15 @@ identity、payload 与 pending 并返回 task ID；重复请求在 dedupe 窗口
 
 ### 5.2 晋升与认领
 
-Promoter 仅判断 run_at 与纯前置条件，批量 `pending → schedulable`。控制面必须持有 PG epoch；claim
-事务原子预留 `concurrency_reservations`，迁移到 processing 并递增 attempts。名额、attempt 与 epoch
-均由 PG 裁决，不能由 channel 或 worker 本地状态裁决。
+Promoter 仅判断 run_at 与纯前置条件（含 `vpc`/`node` 等业务无关调度约束，§3.1），批量
+`pending → schedulable`。控制面必须持有 PG epoch；claim 事务按同一组约束筛选候选、原子预留
+`concurrency_reservations`，迁移到 processing 并递增 attempts。名额、attempt 与 epoch 均由 PG 裁决，
+不能由 channel 或 worker 本地状态裁决。
 
 ### 5.3 通过 EventBus 分发
 
-Scheduler 按任务 `channel` 选择 `eventbus/channel` 实现，且只 claim 当前可立即发送的量：
+Scheduler 按任务 `channel` 选择 `eventbus/channel` 实现、按 `vpc`/`node` 约束选择执行节点（§3.1，
+路由决策全在调度侧），且只 claim 当前可立即发送的量：
 
 ```mermaid
 sequenceDiagram
@@ -50,14 +52,15 @@ worker 订阅任务 topic，按 attempt 注册本地执行、运行 handler 并�
 发送 `ResultEvent`。WAL 重放会重复发布，允许。默认实现同时维护到调度节点的 gRPC 双向 result stream：
 stream 断开时 worker 重连并重发未确认 WAL 条目。若改用 Redis result channel，语义仍是可丢失/可重复。
 
-worker 不直接写 PG 终态，也不决定重试。可选的 Redis inprocess/容量上报仅用于调度提示和观测；其丢失
-不得改变 R1 结论。
+worker 不直接写 PG 终态，也不决定重试。可选的 Redis 容量提示视图（`internal/domain/cacheview`，§8）
+仅用于调度提示和观测；其丢失不得改变 R1 结论。
 
 ### 5.5 订阅归集与重试
 
 Collector 订阅 result topic，将 RPC 适配结果与异步 worker 结果汇入一个批处理器。每条结果通过一次
 PG 事务：验证 attempt 与当前 control epoch → 释放名额 → processing 迁移 completed、合并 payload、
-写入不可变 `task_results`、派生 callback、写墓碑。重复事件无副作用。
+写入不可变 `task_results`、派生 callback、写墓碑。墓碑即 `task_results` 的 `task_id` 主键终态行：
+重复 ResultEvent 因主键冲突被拒，不再产生副作用。
 
 可重试失败只回 schedulable 并写 full-jitter 退避，**不增加 attempts**；下次 claim 才会生成新 fence。
 如果 ResultEvent 永远没有抵达（包括 Redis 全丢），R1 在 `max(timeout, dispatch_grace) + skew` 后重置
@@ -66,4 +69,5 @@ processing，因此正确性不依赖 EventBus 可达。
 ### 5.6 工厂与回调
 
 TaskFactory 和 callback 仍只创建一次性任务；Factory 仅在持有 control epoch 的节点运行，错过周期窗口
-跳过。OnSuccess/OnError 在终态事务内按 `parent:attempt:outcome` 幂等键派生，深度上限 8。
+跳过。Factory 生成的任务在任务行记录 `batch_id`，`completed_tasks` 按该列建索引供工厂孤儿判定使用。
+OnSuccess/OnError 在终态事务内按 `parent:attempt:outcome` 幂等键派生，深度上限 8。

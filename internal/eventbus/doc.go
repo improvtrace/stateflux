@@ -7,7 +7,8 @@
 // 终态与对账（R1–R5）保证（§1.2.1、§4）。因此本包与所有实现都不提供持久化、至少一次或
 // 恰一次承诺，也不把任何 broker 的 ack/AOF/PEL/consumer group 提升为架构承诺（§9.3）。
 //
-// topic 约定（§3.2）：任务为 task.{priority}（TaskTopic），结果为 result（ResultTopic）。
+// topic 约定（§3.2）：任务为 task.{band}（TaskTopic）——band 是数值 priority 的分档
+// （low/normal/high，见 schema.BandOf），不是原始 0–100 数值；结果为 result（ResultTopic）。
 // 使用方式：
 //
 //   - 调度侧：按任务行的 channel 名经 Registry 解析实现，用 Bus.Send 分发，且只 claim

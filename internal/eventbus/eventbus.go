@@ -13,8 +13,10 @@ import (
 // 汇入同一入口，Collector 订阅它（§5.5）。
 const ResultTopic channel.Topic = "result"
 
-// TaskTopic 返回某优先级的任务 topic：task.{priority}（§3.2）。
-func TaskTopic(priority string) channel.Topic { return channel.Topic("task." + priority) }
+// TaskTopic 返回某优先级档位的任务 topic：task.{band}（§3.2）。band 是数值 priority 的派生档位
+// （schema.BandOf：low/normal/high），不是原始 0–100 数值——topic 只做订阅与投递分组，不该随业务
+// 细分膨胀出上百个 topic；精确优先顺序仍由 PG 的 priority 排序决定（§5.2）。
+func TaskTopic(band string) channel.Topic { return channel.Topic("task." + band) }
 
 // 通信面直接复用 channel 契约，不在其上再造一层类型。
 type (

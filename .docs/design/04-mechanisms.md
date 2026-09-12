@@ -1,6 +1,6 @@
 # stateflux 设计 · 关键机制与 RPC 契约（§6–§7）
 
-> v3.19（2026-09-12）。§ 编号全库沿用，文件映射见 [README](./README.md)。
+> v3.20（2026-09-12）。§ 编号全库沿用，文件映射见 [README](./README.md)。
 
 ## 6. 关键机制
 
@@ -22,7 +22,7 @@ attempt fence 覆盖结果、重试、死信和 callback；control epoch 覆盖�
 
 - **R1**：processing 超过 `max(timeout, dispatch_grace) + skew` 且未终态，释放名额并移回
   schedulable，写 full-jitter 退避；不增加 attempts。
-- **R2**：清理可选 Redis inprocess/容量视图；不据此修改 PG。
+- **R2**：清理可选 Redis 容量提示视图（`domain/cacheview`，§8）；不据此修改 PG。
 - **R3**：重试时若 `attempts >= max_attempts`，事务内释放名额并写 `completed{dead}`。
 - **R4**：Redis 或所有 channel 不可用后的 PG 扫描重投；没有“恢复消息队列”的正确性步骤。
 - **R5**：由 processing 聚合重算并发 reservation，修复异常退出造成的漂移。
@@ -40,10 +40,12 @@ pub/sub 是异步广播。所有实现须：携带 task_id/attempt/correlation_i
 
 ### 6.4 观测
 
-OpenTelemetry 指标包括 `eventbus.send`、`eventbus.subscribe`、`eventbus.errors`（channel/kind 标签）、
-`collector.results`、`reconcile.resets`、`control.fence_rejects`、`wal.backlog`、`handler.duration` 与
-`concurrency.reservations`。禁止 task_id/idempotency_key 作为标签。Redis 指标只用于诊断，不作为
-SLO 的正确性来源。
+OpenTelemetry 指标统一带 `stateflux.` 前缀：`stateflux.eventbus.send`、`stateflux.eventbus.subscribe`、
+`stateflux.eventbus.errors`（channel/kind 标签）、`stateflux.collector.results`、
+`stateflux.reconcile.resets`、`stateflux.control.fence_rejects`、`stateflux.wal.backlog.entries` /
+`.bytes`、`stateflux.handler.duration` 与 `stateflux.concurrency.reservations`。禁止
+task_id/idempotency_key 作为标签。水位型指标（wal.backlog、concurrency.reservations）用同步
+Int64Gauge，采集点收敛在既有写路径，免去回调装配。Redis 指标只用于诊断，不作为 SLO 的正确性来源。
 
 ## 7. RPC 契约
 

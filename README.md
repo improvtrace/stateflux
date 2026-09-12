@@ -4,7 +4,7 @@
 Redis、RPC 或任何消息通道的持久性：PG 的四阶段账本、attempt fencing 和对账负责收敛；业务 handler
 仍必须幂等。
 
-当前设计为 **v3.19**，详见 [设计索引](./.docs/design/README.md)。仓库处于骨架阶段，按设计 §12 实施。
+当前设计为 **v3.20**，详见 [设计索引](./.docs/design/README.md)。仓库处于骨架阶段，按设计 §12 实施。
 
 ## 核心设计
 

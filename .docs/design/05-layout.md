@@ -1,8 +1,8 @@
 # stateflux 设计 · 模块划分（§8）
 
-> v3.19（2026-09-12）。§ 编号全库沿用，文件映射见 [README](./README.md)。
+> v3.20（2026-09-12）。§ 编号全库沿用，文件映射见 [README](./README.md)。
 
-## 8. 模块划分（v3.10 收编；v3.12 domain/repository；v3.15 内核并入 domain；v3.16 契约收编 api/ + 两运行时；v3.17 controller 更名 runtime；v3.18 账本与控制 fence；v3.19 eventbus/channel 与 Redis 定位收敛）
+## 8. 模块划分（v3.10 收编；v3.12 domain/repository；v3.15 内核并入 domain；v3.16 契约收编 api/ + 两运行时；v3.17 controller 更名 runtime；v3.18 账本与控制 fence；v3.19 eventbus/channel 与 Redis 定位收敛；v3.20 调度约束字段 vpc/node、operator/group 业务字段、0–100 优先级区间、数值 outcome 枚举与表/列注释）
 
 ```
 stateflux/
@@ -12,7 +12,7 @@ stateflux/
 ├── cmd/stateflux/    # 服务入口：flag/env → config → obs 装配 → internal/server 编排启动
 │                     # （工具链命令如实时指标查询，按需在 cmd/ 扩展）
 ├── internal/         # 引擎收编（Go internal 可见性：外部模块禁止 import；无顶层公开引擎包）
-│   ├── server/       # 编排层：biz + scheduler 运行时 + worker 运行时的装配与启停 + Handler 注册点（§7）
+│   ├── server/       # 编排层：biz + scheduler 运行时 + worker 运行时的装配与启停 + Handler 注册点（§1.2.8）
 │   ├── biz/          # task/v1 服务端业务：Execute 执行编排 / Collect 结果上报（经 server 装配注入 worker）
 │   ├── runtime/      # 控制面（调度侧）运行时归组：随选举启停，仅调度节点运行
 │   │   ├── scheduler/  # fenced 晋升/原子名额 claim → EventBus channel 分发
@@ -31,13 +31,14 @@ stateflux/
 │   │   │             #   retry.go（Backoff/NonRetryable）、snowflake.go（任务 ID 生成）
 │   │   ├── repository/ # 函数写入面/晋升/fenced claim/终态/对账/查询；ent 类型安全 API，
 │   │   │             #     identity upsert + 条件名额预留承载幂等与并发，FOR UPDATE 承载 attempt
-│   │   │             #     fencing；仅认领挪行 SKIP LOCKED 单条 SQL 经 ent 连接原生下沉，§9.1）
+│   │   │             #     fencing；仅认领挪行 SKIP LOCKED 单条 SQL 经 ent 连接原生下沉，§3.1）
 │   │   ├── data/     # 数据源基建：pg 连接池 + ent client、redis client（双栈在此被使用，不设显式
 │   │   │             #     pg/redis 子包；ent 生成码由 make generate 产出，不入库）
 │   │   ├── cacheview/ # 可选 Redis 观测/容量提示（非正确性路径）
-│   │   ├── migration/ # 数据面迁移：enqueue 函数、权限、索引/触发器 + ent migrations
+│   │   ├── migration/ # 数据面迁移：enqueue 函数、权限、索引/触发器 + ent migrations + 表注释
+│   │   │             #     （table_comments.sql：ent 不生成 COMMENT ON TABLE，§3.1）
 │   │   └── schema/   # ent 表定义（四阶段 + payload/result + identity/reservation/control lease；生成码依赖 ent，
-│   │   │             #     输出至 domain/data/ent，不入库）
+│   │   │             #     输出至 domain/data/ent，不入库）；列注释随 .Comment() 写进 DDL，枚举为数值编码
 │   ├── eventbus/     # 逻辑 topic 与 Send/Subscribe（§3.2）；channel/ 是唯一节点通信抽象，
 │   │   │             #   rpc/、redis/ 只是实现——任何实现都不得以 broker 持久性或 ack 提升可靠性
 │   │   ├── channel/  # Send/Subscribe + 单向、半双工、全双工能力抽象 + in-memory fake（§12.1）
@@ -91,6 +92,9 @@ collector → Result，跨聚合的 reconcile/factory/biz → Store）。默认 
 
 ### 8.1 布局迁移（v3.9 平铺 → v3.10 收编）
 
+> **历史记录**：以下清单是 v3.10 当时的机械搬迁过程（2026-09-10 执行完毕）。命令与路径随后续版本
+> 演进（v3.12/v3.15/v3.16 等）已过期，**勿按此执行**；当前验证方式见本节第 6 条与上文可见性规则。
+
 语义零变更，纯机械搬迁；已于 2026-09-10 按序执行完毕，v3.11 增量：`sdk` 提升回顶层、新增
 `build/` 与 `hack/`；v3.12 增量：`store`/`storepg` 重组为 `domain`（接口）+ `domain/repository/pg`
 （实现，数据访问分层、接口按聚合拆分，§8）；v3.13 增量：`collector`/`reconcile`/`executor`
@@ -114,4 +118,5 @@ collector → Result，跨聚合的 reconcile/factory/biz → Store）。默认 
 4. 全量重写 import 路径（`stateflux/<pkg>` → `stateflux/internal/<pkg>`）；
 5. Makefile：`build` 指向 `./cmd/stateflux`，`generate` 指向 `./internal/storepg/ent/schema`，
    `proto` 拆为对外（`proto/*.proto`）与内部（`internal/proto/*.proto`）两条 protoc 命令；
-6. 验证：`go build ./...` + `go vet ./...` + `make test`（含 e2e 全链路）；README 示例路径同步。
+6. 验证：`go build ./...` + `go vet ./...` + demo 冒烟（`hack/dev.sh up` 与 `hack/dev.sh run`）；
+   测试基座已按上文可见性规则清空，`make test` 目标当前不存在；README 示例路径同步。

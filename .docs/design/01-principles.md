@@ -1,6 +1,6 @@
 # stateflux 设计 · 准则与总体架构（§1–§2）
 
-> v3.19（2026-09-12）。§ 编号全库沿用，文件映射见 [README](./README.md)。
+> v3.20（2026-09-12）。§ 编号全库沿用，文件映射见 [README](./README.md)。
 
 ## 1. 设计准则（硬约束）
 
@@ -45,7 +45,8 @@
    服务的引擎内部组件，置于 `internal/` 之下，「不作为三方库对外承诺 API、不支持嵌入业务进程」由
    Go internal 可见性规则**编译器强制**（§8；无顶层公开引擎包，内核并入 `internal/domain`，见 §8）。
    业务经本地事务调用受限的 PG 写入函数跨进程接入（§5.1；业务接入 RPC 契约不做）；业务执行逻辑以
-   `Handler` 形式在服务构建时注册（§7），task/v1 服务端业务由 `internal/biz` 承载（§8）。
+   `Handler` 形式在服务构建时注册（§1.2.8、§8 的 `internal/server` 装配与 Handler 注册点），
+   task/v1 服务端业务由 `internal/biz` 承载（§8）。
 9. **数据访问统一走 ent，观测统一走 OpenTelemetry**：任务表组的全部读写基于 ent
    （entgo.io/ent，Kratos 官方集成指南推荐的 ORM），schema 即代码；并发认领、批量挪行、
    `ON CONFLICT` 等关键 SQL 通过 ent 原生 SQL 下沉，不被 ORM 隐式重写（§3.1）。指标与链路追踪统一
@@ -75,6 +76,10 @@ flowchart LR
 - PG 是唯一权威，EventBus 整层可丢失/重复/长时间不可用：Send/Call 的返回不用于推断任务是否执行（§1.2.1、§5.3）。
 - Worker 只发 ResultEvent、不写 PG，终态只在 Collector 的一次事务内发生（§5.5）。
 - 换 channel 实现（RPC / gRPC stream / Redis）只改变延迟与成本，不改变任何流向（§11）。
+- 「唯一节点通信面」指任务与结果通道：`ClusterView` 是外部选举/成员服务的 RPC 客户端，属显式例外，
+  不由 EventBus 承载（§2.1、§8）。
+- direct RPC（半双工 request/reply）的两端就是调用双方（Scheduler → Worker），中间没有 broker；
+  图中 EB 表示 channel 抽象本身，不代表部署拓扑（§3.2、§5.3）。
 
 ### 2.1 进程与角色模型
 
