@@ -64,6 +64,7 @@ var ProviderSet = wire.NewSet(
 	provideCollectorRunnerComponent,
 	provideReconciler,
 	provideReconcileComponent,
+	provideChannelProbe,
 
 	// 调度
 	provideCycle,

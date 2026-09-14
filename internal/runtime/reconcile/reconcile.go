@@ -31,6 +31,12 @@ type OrphanScanner interface {
 	StaleBatches(ctx context.Context, before time.Time, limit int) ([]string, error)
 }
 
+// ChannelProbe 报告节点通信通道是否可用（R4，§14.9）。实现可探测 Redis 等中间件；
+// 报告不可用时 Reconciler 立即触发一次 R1 扫描（加速收敛，不缩短 grace）。
+type ChannelProbe interface {
+	ChannelsAvailable(ctx context.Context) (bool, error)
+}
+
 // Options 是 Reconciler 装配参数。
 type Options struct {
 	Ledger Ledger
@@ -50,7 +56,11 @@ type Options struct {
 	Orphans OrphanScanner
 	// OrphanAge 是在途批次被判为孤儿的年龄阈值；<=0 用 2*(Grace+Skew)。
 	OrphanAge time.Duration
-	Metrics   *obs.Metrics
+	// Probe 非空时启用 R4：通道不可用即触发即时扫描（§14.9）。
+	Probe ChannelProbe
+	// ProbeInterval 是 R4 探测周期；<=0 用 DefaultProbeInterval。
+	ProbeInterval time.Duration
+	Metrics       *obs.Metrics
 }
 
 // Reconciler 周期性执行 R1（并可选 R2）。
@@ -65,6 +75,8 @@ type Reconciler struct {
 	every     int
 	orphans   OrphanScanner
 	orphanAge time.Duration
+	probe     ChannelProbe
+	probeTick time.Duration
 	metrics   *obs.Metrics
 
 	mu     sync.Mutex
@@ -99,6 +111,10 @@ func New(opts Options) *Reconciler {
 	if orphanAge <= 0 {
 		orphanAge = 2 * (grace + skew)
 	}
+	probeTick := opts.ProbeInterval
+	if probeTick <= 0 {
+		probeTick = DefaultProbeInterval
+	}
 	return &Reconciler{
 		ledger:    opts.Ledger,
 		view:      opts.View,
@@ -110,9 +126,14 @@ func New(opts Options) *Reconciler {
 		every:     every,
 		orphans:   opts.Orphans,
 		orphanAge: orphanAge,
+		probe:     opts.Probe,
+		probeTick: probeTick,
 		metrics:   opts.Metrics,
 	}
 }
+
+// DefaultProbeInterval 是 R4 通道探测的缺省周期。
+const DefaultProbeInterval = 2 * time.Second
 
 // Start 启动对账循环（非阻塞）；重复 Start 返回错误。
 func (r *Reconciler) Start(ctx context.Context) error {
@@ -142,7 +163,34 @@ func (r *Reconciler) Start(ctx context.Context) error {
 			}
 		}
 	}()
+	if r.probe != nil {
+		r.wg.Add(1)
+		go r.probeLoop(runCtx)
+	}
 	return nil
+}
+
+// probeLoop 是 R4：周期探测通道，不可用时立即触发一次 R1 扫描（不等待下一个 tick）。
+// 这是对 §14.9 待定项的落地选择——R4 不新增恢复步骤，只是把 R1 的触发提前。
+func (r *Reconciler) probeLoop(ctx context.Context) {
+	defer r.wg.Done()
+	t := time.NewTicker(r.probeTick)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			available, err := r.probe.ChannelsAvailable(ctx)
+			if err == nil && available {
+				continue
+			}
+			if r.metrics != nil {
+				r.metrics.ResetCount(ctx, "r4_channel_down", 1)
+			}
+			_, _ = r.RunOnce(ctx)
+		}
+	}
 }
 
 // Stop 停止对账循环（幂等）。

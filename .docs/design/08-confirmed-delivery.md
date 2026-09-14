@@ -108,3 +108,22 @@ STATEFLUX_TEST_DSN='postgres://stateflux:stateflux@127.0.0.1:5432/stateflux?sslm
   `"$user", public` 会把 ent 与原生 SQL 解析到 `stateflux` schema，而 SQL 函数固定写在 `public`，
   造成「应用与函数写两张表」。`data.WithSearchPath` 现在把连接 `search_path` 固定为
   `config.PG.SearchPath`（默认 `public`），`make api/generate/wire` 与迁移顺序不受影响。
+
+## 15.6 第三轮补充落地（v4.2）
+
+- **按共识动态订阅（§15.1#4）**：`worker.QueueSource` + `biz.QueueSource` 把 coherence 物化的
+  「队列→节点」映射接入执行运行时；运行时按周期对齐订阅集合（新增缺失、关闭多余），
+  视图为空时回落静态配置，视图报错时保留既有订阅。新增 `Runtime.SubscribedQueues` 诊断。
+- **磁盘 WAL 与高水位反压（§5.4、§14.7）**：`worker.WAL` 抽象为接口，新增 append-only 的
+  `DiskWAL`（`add`/`ack` 记录、重放、按 ack 数压缩）；`HighWater` 在条目/字节超限时暂停
+  **新**订阅、继续结果发送（§10）。配置 `Runtime.WALDir/WALMaxEntries/WALMaxBytes`，
+  磁盘打开失败退化为内存 WAL。
+- **结果通道可替换（§5.5）**：`Dispatch.ResultChannel` 选择结果归集通道——默认 `stream`
+  （worker→调度节点 gRPC ResultStream），可改为 `redis-pubsub`/`redis-list` 等，由
+  `collector.Runner` 订阅同一 `result` topic。已实测 `redis-pubsub` 路径端到端完成终态。
+- **R4 触发落地（§14.9）**：`reconcile.ChannelProbe` 周期探测通道可用性，报告不可用时
+  **立即触发一次 R1 扫描**（不缩短 grace，不新增恢复步骤），并以 `reason=r4_channel_down`
+  记录指标。默认探测实现为 Redis PING。
+- **控制面随选举启停（§2.1）**：`server.electionGate` 依据集群视图的 `scheduler_node_id`
+  启停 Scheduler/Collector/Reconciler/Factory/Coherence 同步；选举切换自动接管与让出，
+  执行侧（worker、coherence 拉取）仍常驻所有节点。

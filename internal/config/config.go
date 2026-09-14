@@ -128,6 +128,12 @@ type Runtime struct {
 	WorkerQueues []string
 	// FactoryInterval 是内置示例工厂的生成周期（§5.6）；<=0 表示不注册工厂。
 	FactoryInterval time.Duration
+	// WALDir 是结果 WAL 目录（§5.4）；空表示使用进程内 WAL。
+	WALDir string
+	// WALMaxEntries 是 WAL 高水位条目数（§10 默认 10k）。
+	WALMaxEntries int
+	// WALMaxBytes 是 WAL 高水位字节数（§10 默认 256MB）。
+	WALMaxBytes int64
 }
 
 // Delivery 是分发投递形态（§15.1#5）。
@@ -166,6 +172,9 @@ type Dispatch struct {
 	Timeout time.Duration
 	// DedupeWindow exactly_once 的入口去重窗口。
 	DedupeWindow time.Duration
+	// ResultChannel 是结果归集通道的逻辑名（§5.5）：默认 stream（worker→调度节点 gRPC
+	// ResultStream），可替换为 redis-pubsub / redis-list 等。
+	ResultChannel string
 }
 
 // Coherence 是共识信息同步配置（§15.1#4）。
@@ -239,6 +248,9 @@ func Default() Config {
 			DispatchGrace:     90 * time.Second,
 			WorkerQueues:      []string{"default"},
 			FactoryInterval:   30 * time.Second,
+			WALDir:            ".stateflux-wal",
+			WALMaxEntries:     10000,
+			WALMaxBytes:       256 << 20,
 		},
 		Dispatch: Dispatch{
 			DefaultSemantics: AtLeastOnce,
@@ -247,6 +259,7 @@ func Default() Config {
 			MaxHops:          3,
 			Timeout:          10 * time.Second,
 			DedupeWindow:     10 * time.Minute,
+			ResultChannel:    "stream",
 		},
 		Coherence: Coherence{
 			QueuePrefix:  "stateflux:queue:",
@@ -308,6 +321,9 @@ func FromEnv() Config {
 	envDuration(func(key string, val time.Duration) { cfg.Runtime.DispatchGrace = val }, "STATEFLUX_RUNTIME_DISPATCH_GRACE")
 	envStrings(func(key string, val []string) { cfg.Runtime.WorkerQueues = val }, "STATEFLUX_RUNTIME_WORKER_QUEUES")
 	envDuration(func(key string, val time.Duration) { cfg.Runtime.FactoryInterval = val }, "STATEFLUX_RUNTIME_FACTORY_INTERVAL")
+	envString(func(key, val string) { cfg.Runtime.WALDir = val }, "STATEFLUX_RUNTIME_WAL_DIR")
+	envInt(func(key string, val int) { cfg.Runtime.WALMaxEntries = val }, "STATEFLUX_RUNTIME_WAL_MAX_ENTRIES")
+	envInt64(func(key string, val int64) { cfg.Runtime.WALMaxBytes = val }, "STATEFLUX_RUNTIME_WAL_MAX_BYTES")
 
 	envString(func(key, val string) { cfg.Dispatch.DefaultSemantics = Semantics(val) }, "STATEFLUX_DISPATCH_DEFAULT_SEMANTICS")
 	envString(func(key, val string) { cfg.Dispatch.DefaultDelivery = Delivery(val) }, "STATEFLUX_DISPATCH_DEFAULT_DELIVERY")
@@ -315,6 +331,7 @@ func FromEnv() Config {
 	envInt(func(key string, val int) { cfg.Dispatch.MaxHops = val }, "STATEFLUX_DISPATCH_MAX_HOPS")
 	envDuration(func(key string, val time.Duration) { cfg.Dispatch.Timeout = val }, "STATEFLUX_DISPATCH_TIMEOUT")
 	envDuration(func(key string, val time.Duration) { cfg.Dispatch.DedupeWindow = val }, "STATEFLUX_DISPATCH_DEDUPE_WINDOW")
+	envString(func(key, val string) { cfg.Dispatch.ResultChannel = val }, "STATEFLUX_DISPATCH_RESULT_CHANNEL")
 
 	envString(func(key, val string) { cfg.Coherence.QueuePrefix = val }, "STATEFLUX_COHERENCE_QUEUE_PREFIX")
 	envDuration(func(key string, val time.Duration) { cfg.Coherence.SyncInterval = val }, "STATEFLUX_COHERENCE_SYNC_INTERVAL")
@@ -337,6 +354,14 @@ func envString(set func(key, val string), key string) {
 func envInt(set func(key string, val int), key string) {
 	if v, ok := os.LookupEnv(key); ok {
 		if n, err := strconv.Atoi(v); err == nil {
+			set(key, n)
+		}
+	}
+}
+
+func envInt64(set func(key string, val int64), key string) {
+	if v, ok := os.LookupEnv(key); ok {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			set(key, n)
 		}
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -20,6 +21,12 @@ import (
 // 也可经 Redis 结果通道或直接交给 Collector，§5.4/§5.5）。
 type ResultSink func(ctx context.Context, ev *taskv1.ResultEvent) error
 
+// QueueSource 提供「本节点当前应消费的队列」集合（§15.1#4）。生产装配把 coherence 的
+// 队列↔节点映射适配为它；返回错误时运行时保留既有订阅（不能因为视图抖动停止消费，§6.1）。
+type QueueSource interface {
+	AssignedQueues(ctx context.Context, nodeID string) ([]string, error)
+}
+
 // RuntimeOptions 是执行运行时装配参数。
 type RuntimeOptions struct {
 	// Bus 用于订阅异步任务队列（§5.3）。
@@ -28,14 +35,18 @@ type RuntimeOptions struct {
 	Codec *codec.Codec
 	// Handlers 是执行处理器注册表；未命中即返回 failed。
 	Handlers *HandlerRegistry
-	// Queues 是本节点订阅的逻辑队列名集合。
+	// Queues 是本节点订阅的逻辑队列名集合（无 QueueSource 时的静态集合，也是视图缺失时的兜底）。
 	Queues []string
+	// QueueSource 非空时按 coherence 映射动态订阅（§15.1#4）。
+	QueueSource QueueSource
+	// QueueRefresh 是动态订阅的重算周期；<=0 用 DefaultQueueRefresh。
+	QueueRefresh time.Duration
 	// NodeID 是本节点 ID（写入 ResultEvent.source）。
 	NodeID string
 	// ResultSink 发布结果；nil 时 Execute 只写 WAL 不发布。
 	ResultSink ResultSink
 	// WAL 结果本地日志；nil 时创建进程内默认 WAL。
-	WAL *WAL
+	WAL WAL
 	// Metrics 观测。
 	Metrics *obs.Metrics
 	// RetryInterval 是 WAL 重放周期；<=0 用 DefaultRetryInterval。
@@ -47,6 +58,9 @@ type RuntimeOptions struct {
 // DefaultRetryInterval 是 WAL 重放周期（§10 ResultStream reconnect 1s 起点）。
 const DefaultRetryInterval = time.Second
 
+// DefaultQueueRefresh 是动态队列订阅的重算周期。
+const DefaultQueueRefresh = 5 * time.Second
+
 // Runtime 是执行侧运行时（§5.4）：订阅任务队列、执行 handler、先写 WAL 再发布结果。
 // 它不写 PG 终态、不决定重试；本地 WAL 与状态都是易失派生数据（§1.2.4）。
 type Runtime struct {
@@ -56,13 +70,16 @@ type Runtime struct {
 	queues   []string
 	nodeID   string
 	sink     ResultSink
-	wal      *WAL
+	wal      WAL
 	metrics  *obs.Metrics
 	retry    time.Duration
 	timeout  time.Duration
 
+	queueSource  QueueSource
+	queueRefresh time.Duration
+
 	mu     sync.Mutex
-	subs   []channel.Subscription
+	subs   map[string]channel.Subscription
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
@@ -81,22 +98,29 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
+	refresh := opts.QueueRefresh
+	if refresh <= 0 {
+		refresh = DefaultQueueRefresh
+	}
 	return &Runtime{
-		bus:      opts.Bus,
-		codec:    opts.Codec,
-		handlers: opts.Handlers,
-		queues:   append([]string(nil), opts.Queues...),
-		nodeID:   opts.NodeID,
-		sink:     opts.ResultSink,
-		wal:      wal,
-		metrics:  opts.Metrics,
-		retry:    retry,
-		timeout:  timeout,
+		bus:          opts.Bus,
+		codec:        opts.Codec,
+		handlers:     opts.Handlers,
+		queues:       append([]string(nil), opts.Queues...),
+		queueSource:  opts.QueueSource,
+		queueRefresh: refresh,
+		nodeID:       opts.NodeID,
+		sink:         opts.ResultSink,
+		wal:          wal,
+		metrics:      opts.Metrics,
+		retry:        retry,
+		timeout:      timeout,
+		subs:         map[string]channel.Subscription{},
 	}
 }
 
 // WAL 返回运行时使用的结果日志（供水位观测）。
-func (r *Runtime) WAL() *WAL { return r.wal }
+func (r *Runtime) WAL() WAL { return r.wal }
 
 // Start 订阅全部队列并启动 WAL 重放循环；重复 Start 返回错误。
 func (r *Runtime) Start(ctx context.Context) error {
@@ -113,8 +137,56 @@ func (r *Runtime) Start(ctx context.Context) error {
 	r.mu.Unlock()
 
 	// 任务订阅走 task topic（§5.3）：逻辑 channel 名即队列/topic 名。
-	for _, queue := range r.queues {
-		ch, err := r.bus.Resolve(queue)
+	// 初始订阅集来自 coherence 映射；映射不可用时回落到静态配置（§15.1#4）。
+	r.subscribeDesired(runCtx)
+
+	r.wg.Add(1)
+	go r.retryLoop(runCtx)
+	if r.queueSource != nil {
+		r.wg.Add(1)
+		go r.queueLoop(runCtx)
+	}
+	return nil
+}
+
+// subscribeDesired 计算期望队列集合并与现有订阅对齐。
+func (r *Runtime) subscribeDesired(ctx context.Context) {
+	desired := append([]string(nil), r.queues...)
+	if r.queueSource != nil {
+		if queues, err := r.queueSource.AssignedQueues(ctx, r.nodeID); err == nil {
+			desired = queues
+		}
+	}
+	r.reconcileSubscriptions(ctx, desired)
+}
+
+// reconcileSubscriptions 使订阅集合收敛到 want：新增缺失、关闭多余。
+func (r *Runtime) reconcileSubscriptions(ctx context.Context, want []string) {
+	wantSet := make(map[string]struct{}, len(want))
+	for _, q := range want {
+		if q != "" {
+			wantSet[q] = struct{}{}
+		}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for q, sub := range r.subs {
+		if _, ok := wantSet[q]; ok {
+			continue
+		}
+		_ = sub.Close()
+		delete(r.subs, q)
+	}
+	paused := r.wal != nil && r.wal.HighWater()
+	for q := range wantSet {
+		if _, ok := r.subs[q]; ok {
+			continue
+		}
+		if paused {
+			// 高水位：暂停新订阅、继续结果发送（§10、§14.7）。
+			continue
+		}
+		ch, err := r.bus.Resolve(q)
 		if err != nil {
 			continue
 		}
@@ -122,18 +194,27 @@ func (r *Runtime) Start(ctx context.Context) error {
 		if !ok {
 			continue
 		}
-		sub, err := subber.Subscribe(runCtx, channel.Topic(queue), r.onEnvelope)
+		sub, err := subber.Subscribe(ctx, channel.Topic(q), r.onEnvelope)
 		if err != nil {
 			continue
 		}
-		r.mu.Lock()
-		r.subs = append(r.subs, sub)
-		r.mu.Unlock()
+		r.subs[q] = sub
 	}
+}
 
-	r.wg.Add(1)
-	go r.retryLoop(runCtx)
-	return nil
+// queueLoop 周期重算订阅集合（coherence 映射变化后自动增减队列）。
+func (r *Runtime) queueLoop(ctx context.Context) {
+	defer r.wg.Done()
+	t := time.NewTicker(r.queueRefresh)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			r.subscribeDesired(ctx)
+		}
+	}
 }
 
 // Stop 停止订阅与重放循环；幂等。
@@ -142,7 +223,7 @@ func (r *Runtime) Stop() error {
 	cancel := r.cancel
 	subs := r.subs
 	r.cancel = nil
-	r.subs = nil
+	r.subs = map[string]channel.Subscription{}
 	r.mu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -151,7 +232,22 @@ func (r *Runtime) Stop() error {
 		_ = sub.Close()
 	}
 	r.wg.Wait()
+	if r.wal != nil {
+		_ = r.wal.Close()
+	}
 	return nil
+}
+
+// SubscribedQueues 返回当前已订阅队列（诊断与测试）。
+func (r *Runtime) SubscribedQueues() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, 0, len(r.subs))
+	for q := range r.subs {
+		out = append(out, q)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // onEnvelope 处理订阅到的任务载荷：优先按 codec 帧解码，回落到 TaskMessage 原始 protobuf。
@@ -282,5 +378,5 @@ func (r *Runtime) recordBacklog(ctx context.Context) {
 	if r.metrics == nil {
 		return
 	}
-	r.metrics.WALBacklogRecord(ctx, int64(r.wal.Len()), 0)
+	r.metrics.WALBacklogRecord(ctx, int64(r.wal.Len()), r.wal.Bytes())
 }

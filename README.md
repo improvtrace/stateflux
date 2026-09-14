@@ -49,6 +49,20 @@ internal/
 └── obs/                   # OTel 指标/链路装配
 ```
 
+## 运行时开关（`STATEFLUX_*` 环境变量）
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `STATEFLUX_CLUSTER_TRANSPORT` | `static` | `static` / `grpc` / `http` |
+| `STATEFLUX_CLUSTER_ENDPOINT` | – | 外置集群视图地址（grpc/http） |
+| `STATEFLUX_RUNTIME_SCHEDULER_TRIGGERS` | `tick` | 触发方式：`tick,notify,coherence,manual`（多实例） |
+| `STATEFLUX_DISPATCH_RESULT_CHANNEL` | `stream` | 结果归集通道，可换 `redis-pubsub`/`redis-list` |
+| `STATEFLUX_RUNTIME_WAL_DIR` | `.stateflux-wal` | 结果 WAL 目录；空为进程内 WAL |
+| `STATEFLUX_PG_SEARCH_PATH` | `public` | 固定 search_path（避免用户名与 schema 同名） |
+
+控制面（Scheduler/Collector/Reconciler/Factory/Coherence 同步）仅在外部选举指向本实例时运行；
+执行侧（worker、coherence 拉取）常驻所有节点（§2.1）。
+
 ## 开发
 
 ```bash

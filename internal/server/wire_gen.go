@@ -56,7 +56,7 @@ func InitializeApplication(ctx context.Context, cfg config.Config) (*App, func()
 		cleanup()
 		return nil, nil, err
 	}
-	runtime := provideWorkerRuntime(cfg, eventBus, codec, handlerRegistry, resultPublisher, metrics)
+	runtime := provideWorkerRuntime(cfg, eventBus, codec, handlerRegistry, resultPublisher, cacheviewView, metrics)
 	snowflake := provideSnowflake(cfg)
 	store := provideStore(data, snowflake)
 	collector := provideCollector(store, metrics)
@@ -82,7 +82,8 @@ func InitializeApplication(ctx context.Context, cfg config.Config) (*App, func()
 	taskNotifier, cleanup3 := provideTaskNotifier(cfg)
 	group := provideSchedulerGroup(cfg, ledgerCycle, coherenceStore, taskNotifier, metrics)
 	serverSchedulerComponent := provideSchedulerComponent(group)
-	reconciler := provideReconciler(cfg, store, cacheviewView, metrics)
+	channelProbe := provideChannelProbe(data)
+	reconciler := provideReconciler(cfg, store, cacheviewView, channelProbe, metrics)
 	serverReconcileComponent := provideReconcileComponent(reconciler)
 	coherenceSyncer := provideCoherenceSyncer(cfg, coherenceStore, cache, dialer, metrics)
 	serverSyncerComponent := provideSyncerComponent(coherenceSyncer)
@@ -98,9 +99,9 @@ func InitializeApplication(ctx context.Context, cfg config.Config) (*App, func()
 	enqueuer := provideEnqueuer(store, snowflake, cfg)
 	manager := provideFactoryManager(factoryRegistry, enqueuer)
 	serverFactoryComponent := provideFactoryComponent(manager)
-	runner := provideCollectorRunner(eventBus, collector, metrics)
+	runner := provideCollectorRunner(cfg, eventBus, collector, metrics)
 	serverCollectorRunnerComponent := provideCollectorRunnerComponent(runner)
-	v := provideComponents(serverWorkerComponent, serverSchedulerComponent, serverReconcileComponent, serverSyncerComponent, serverPullerComponent, serverFactoryComponent, serverCollectorRunnerComponent)
+	v := provideComponents(cfg, cache, serverWorkerComponent, serverSchedulerComponent, serverReconcileComponent, serverSyncerComponent, serverPullerComponent, serverFactoryComponent, serverCollectorRunnerComponent)
 	app, err := provideApp(cfg, grpcServer, httpServer, v, forwardRegistry, dispatchServer)
 	if err != nil {
 		cleanup3()
@@ -161,6 +162,7 @@ var ProviderSet = wire.NewSet(
 	provideCollectorRunnerComponent,
 	provideReconciler,
 	provideReconcileComponent,
+	provideChannelProbe,
 
 	provideCycle,
 	provideSchedulerGroup,

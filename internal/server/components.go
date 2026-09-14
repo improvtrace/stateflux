@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"net/http"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -32,6 +33,7 @@ import (
 	"github.com/improvtrace/stateflux/internal/task/dispatch"
 	"github.com/improvtrace/stateflux/internal/task/factory"
 	"github.com/improvtrace/stateflux/internal/worker"
+	"github.com/redis/go-redis/v9"
 )
 
 // ---- 领域与基建 ----
@@ -83,9 +85,13 @@ func provideHandlerRegistry() (*worker.HandlerRegistry, error) {
 
 // provideResultPublisher 构造结果发布器（worker.ResultSink）。
 func provideResultPublisher(cfg config.Config, bus *eventbus.EventBus, cache *cluster.Cache, view cacheview.View) *biz.ResultPublisher {
+	channel := cfg.Dispatch.ResultChannel
+	if channel == "" {
+		channel = ChannelStream
+	}
 	return biz.NewResultPublisher(biz.ResultPublisherOptions{
 		Bus:         bus,
-		ChannelName: ChannelStream,
+		ChannelName: channel,
 		Nodes:       cache,
 		View:        view,
 		Timeout:     cfg.Dispatch.Timeout,
@@ -93,17 +99,34 @@ func provideResultPublisher(cfg config.Config, bus *eventbus.EventBus, cache *cl
 }
 
 // provideWorkerRuntime 构造执行运行时（§5.4）。
-func provideWorkerRuntime(cfg config.Config, bus *eventbus.EventBus, cdc *codec.Codec, handlers *worker.HandlerRegistry, publisher *biz.ResultPublisher, metrics *obs.Metrics) *worker.Runtime {
+func provideWorkerRuntime(cfg config.Config, bus *eventbus.EventBus, cdc *codec.Codec, handlers *worker.HandlerRegistry, publisher *biz.ResultPublisher, view cacheview.View, metrics *obs.Metrics) *worker.Runtime {
 	return worker.NewRuntime(worker.RuntimeOptions{
+		WAL:            provideWAL(cfg),
 		Bus:            bus,
 		Codec:          cdc,
 		Handlers:       handlers,
 		Queues:         cfg.Runtime.WorkerQueues,
+		QueueSource:    biz.NewQueueSource(view, cfg.Runtime.WorkerQueues),
+		QueueRefresh:   cfg.Coherence.SyncInterval,
 		NodeID:         cfg.Node.NodeID,
 		ResultSink:     publisher.Publish,
 		Metrics:        metrics,
 		ExecuteTimeout: cfg.Runtime.DispatchGrace,
 	})
+}
+
+// provideWAL 构造结果 WAL（§5.4）：配置了目录走磁盘 append-only，否则进程内实现。
+// 磁盘打开失败不阻塞启动：退化为内存 WAL，正确性仍由 R1 兜底（§6.2）。
+func provideWAL(cfg config.Config) worker.WAL {
+	if cfg.Runtime.WALDir == "" {
+		return worker.NewWAL(cfg.Runtime.WALMaxEntries)
+	}
+	path := filepath.Join(cfg.Runtime.WALDir, "results.wal")
+	disk, err := worker.OpenDiskWAL(path, cfg.Runtime.WALMaxEntries, cfg.Runtime.WALMaxBytes)
+	if err != nil {
+		return worker.NewWAL(cfg.Runtime.WALMaxEntries)
+	}
+	return disk
 }
 
 // ---- 转发 ----
@@ -194,15 +217,21 @@ func provideCollector(store repository.Store, metrics *obs.Metrics) *collector.C
 }
 
 // provideCollectorRunner 构造 Redis 结果通道订阅器（默认禁用，结果走 gRPC stream）。
-func provideCollectorRunner(bus *eventbus.EventBus, c *collector.Collector, metrics *obs.Metrics) *collector.Runner {
-	return collector.NewRunner(collector.RunnerOptions{Bus: bus, ChannelName: "", Collector: c, Metrics: metrics})
+func provideCollectorRunner(cfg config.Config, bus *eventbus.EventBus, c *collector.Collector, metrics *obs.Metrics) *collector.Runner {
+	channel := cfg.Dispatch.ResultChannel
+	if channel == ChannelStream {
+		// 默认结果路径由 biz.ExecutorServer.ResultStream 直接归集，无需订阅。
+		channel = ""
+	}
+	return collector.NewRunner(collector.RunnerOptions{Bus: bus, ChannelName: channel, Collector: c, Metrics: metrics})
 }
 
 // provideReconciler 构造 R1/R2 对账器（§6.2）。
-func provideReconciler(cfg config.Config, store repository.Store, view cacheview.View, metrics *obs.Metrics) *reconcile.Reconciler {
+func provideReconciler(cfg config.Config, store repository.Store, view cacheview.View, probe reconcile.ChannelProbe, metrics *obs.Metrics) *reconcile.Reconciler {
 	return reconcile.New(reconcile.Options{
 		Ledger:      store,
 		Orphans:     store,
+		Probe:       probe,
 		View:        view,
 		Interval:    cfg.Runtime.ReconcileInterval,
 		Grace:       cfg.Runtime.DispatchGrace,
@@ -211,6 +240,28 @@ func provideReconciler(cfg config.Config, store repository.Store, view cacheview
 		PurgePrefix: "",
 		Metrics:     metrics,
 	})
+}
+
+// redisChannelProbe 用 Redis PING 报告通道可用性（R4，§14.9）。
+type redisChannelProbe struct{ client redis.UniversalClient }
+
+// ChannelsAvailable 实现 reconcile.ChannelProbe。
+func (p redisChannelProbe) ChannelsAvailable(ctx context.Context) (bool, error) {
+	if p.client == nil {
+		return true, nil
+	}
+	if err := p.client.Ping(ctx).Err(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// provideChannelProbe 构造 R4 探测（Redis 不可用时返回 nil，R4 关闭）。
+func provideChannelProbe(d *data.Data) reconcile.ChannelProbe {
+	if d == nil || d.Redis() == nil {
+		return nil
+	}
+	return redisChannelProbe{client: d.Redis()}
 }
 
 // ---- 调度 ----
@@ -375,8 +426,12 @@ func (c *runnerComponent) Stop() error {
 	return nil
 }
 
-// provideComponents 汇总全部运行时组件（顺序即启动顺序）。
+// provideComponents 汇总全部运行时组件（顺序即启动顺序）。执行侧（worker、coherence 拉取）
+// 在所有节点运行；控制面（调度/归集/对账/工厂/共识同步）经 electionGate 仅在当选的调度
+// 节点运行（§2.1）。
 func provideComponents(
+	cfg config.Config,
+	cache *cluster.Cache,
 	writer workerComponent,
 	schedulers schedulerComponent,
 	reconciler reconcileComponent,
@@ -389,23 +444,29 @@ func provideComponents(
 	if writer.v != nil {
 		components = append(components, writer.v)
 	}
-	if resultRunner.v != nil {
-		components = append(components, resultRunner.v)
-	}
-	if syncer.v != nil {
-		components = append(components, syncer.v)
-	}
 	if puller.v != nil {
 		components = append(components, puller.v)
 	}
+	gate := func(name string, inner Component) Component {
+		if inner == nil {
+			return nil
+		}
+		return newElectionGate(name, cache, cfg.Node.NodeID, inner, DefaultElectionPollInterval, nil)
+	}
+	if resultRunner.v != nil {
+		components = append(components, gate("collector", resultRunner.v))
+	}
+	if syncer.v != nil {
+		components = append(components, gate("coherence", syncer.v))
+	}
 	if factories.v != nil {
-		components = append(components, factories.v)
+		components = append(components, gate("factory", factories.v))
 	}
 	if schedulers.v != nil {
-		components = append(components, newRunnerComponent("schedulers", schedulers.v.Run))
+		components = append(components, gate("scheduler", newRunnerComponent("schedulers", schedulers.v.Run)))
 	}
 	if reconciler.v != nil {
-		components = append(components, reconciler.v)
+		components = append(components, gate("reconcile", reconciler.v))
 	}
 	return components
 }
