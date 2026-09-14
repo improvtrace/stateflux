@@ -121,6 +121,10 @@ type Runtime struct {
 	ReconcileInterval time.Duration
 	// DispatchGrace 通道无结果前不重试的最小窗口（§10 默认 90s）。
 	DispatchGrace time.Duration
+	// WorkerQueues 是执行运行时订阅的逻辑队列集合（异步任务 channel 名，§5.3）。
+	WorkerQueues []string
+	// FactoryInterval 是内置示例工厂的生成周期（§5.6）；<=0 表示不注册工厂。
+	FactoryInterval time.Duration
 }
 
 // Delivery 是分发投递形态（§15.1#5）。
@@ -229,6 +233,8 @@ func Default() Config {
 			PromoteInterval:   200 * time.Millisecond,
 			ReconcileInterval: 10 * time.Second,
 			DispatchGrace:     90 * time.Second,
+			WorkerQueues:      []string{"default"},
+			FactoryInterval:   30 * time.Second,
 		},
 		Dispatch: Dispatch{
 			DefaultSemantics: AtLeastOnce,
@@ -295,6 +301,8 @@ func FromEnv() Config {
 	envDuration(func(key string, val time.Duration) { cfg.Runtime.PromoteInterval = val }, "STATEFLUX_RUNTIME_PROMOTE_INTERVAL")
 	envDuration(func(key string, val time.Duration) { cfg.Runtime.ReconcileInterval = val }, "STATEFLUX_RUNTIME_RECONCILE_INTERVAL")
 	envDuration(func(key string, val time.Duration) { cfg.Runtime.DispatchGrace = val }, "STATEFLUX_RUNTIME_DISPATCH_GRACE")
+	envStrings(func(key string, val []string) { cfg.Runtime.WorkerQueues = val }, "STATEFLUX_RUNTIME_WORKER_QUEUES")
+	envDuration(func(key string, val time.Duration) { cfg.Runtime.FactoryInterval = val }, "STATEFLUX_RUNTIME_FACTORY_INTERVAL")
 
 	envString(func(key, val string) { cfg.Dispatch.DefaultSemantics = Semantics(val) }, "STATEFLUX_DISPATCH_DEFAULT_SEMANTICS")
 	envString(func(key, val string) { cfg.Dispatch.DefaultDelivery = Delivery(val) }, "STATEFLUX_DISPATCH_DEFAULT_DELIVERY")

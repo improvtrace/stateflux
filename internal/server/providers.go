@@ -99,9 +99,6 @@ func provideEventBus(cfg config.Config, d *data.Data, dialer *rpc.Dialer) (*even
 	return eventbus.NewEventBus(channels)
 }
 
-// provideTimeoutContext 返回一个可取消的后台 context 供组件绑定生命周期。
-func provideBackgroundContext() context.Context { return context.Background() }
-
 // describeChannel 便于启动日志输出装配结果。
 func describeChannel(bus *eventbus.EventBus, name string) string {
 	ch, err := bus.Resolve(name)

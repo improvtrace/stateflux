@@ -2,6 +2,8 @@ package redis
 
 import (
 	"context"
+	"errors"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 
@@ -55,11 +57,16 @@ func (l *List) Subscribe(ctx context.Context, topic channel.Topic, h channel.Han
 			}
 			res, err := l.client.BRPop(subCtx, l.opts.BlockTimeout, key).Result()
 			if err != nil {
-				if ctxErr(err) != nil && subCtx.Err() == nil {
-					// 连接类错误：短暂退避后重试，不视为需要重投。
+				if subCtx.Err() != nil {
+					return
+				}
+				if errors.Is(err, redis.Nil) {
+					// 阻塞超时（队列为空）：继续等待，绝不能把空队列当成订阅结束。
 					continue
 				}
-				return
+				// 连接类错误：短暂退避后重试，不视为需要重投。
+				sleepCtx(subCtx, 100*time.Millisecond)
+				continue
 			}
 			if len(res) < 2 {
 				continue

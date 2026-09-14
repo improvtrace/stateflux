@@ -10,3 +10,6 @@ api/**/*.pb.go
 
 # 编辑器配置
 .vscode/
+
+# 构建产物
+/stateflux
