@@ -6,14 +6,16 @@ package schema
 //     使 Go 零值与漏赋值可检测；
 //   - `priority` 是**连续区间** `[0,100]`，不是枚举：业务可按自己的语义细分（0=最低、100=最高），
 //     调度侧只依赖排序、不解释具体数值；
-//   - `vpc` / `node` 是**外部标识的自由文本**（VPC 名、执行节点 ID，来自 ClusterView）：既不是枚举，
-//     也不做数值编码，取值合法性由集群视图在运行期给出（§3.1/§5.3）。
+//   - `vpc` / `node` / `label` 是**外部标识或接入方自定义的自由文本**（VPC 名、执行节点 ID、节点
+//     匹配标签）：既不是枚举，也不做数值编码，取值合法性由集群视图在运行期给出（§3.1/§5.3）；
+//   - `hash_bucket` 是 0–255 的整数分桶，0=不限：接入方自定义语义，框架只做等值匹配，
+//     区间由 BucketCheck 钉住（§3.1/§5.2）。
 //
 // 编码是存储契约：改动任何数值/区间都等于数据迁移。常量与表定义同包——ent 生成码反向 import
 // 本包，故本包不得 import domain，否则形成 schema → domain → domain/data/ent → schema 的环。
 
-// Priority 是调度优先级：闭区间 [MinPriority, MaxPriority]，数值越大越优先。晋升与认领按该列
-// DESC、run_at ASC 排序（§5.2），因此 100 最先被处理、0 最后。区间由各表的 CHECK 约束钉住
+// Priority 是调度优先级：闭区间 [MinPriority, MaxPriority]，数值越大越优先。晋升与认领均按该列
+// DESC 排序（§5.2），因此 100 最先被处理、0 最后。区间由各表的 CHECK 约束钉住
 // （PriorityCheck），保证越界值写不进来。
 type Priority int8
 
@@ -28,6 +30,10 @@ const (
 
 // PriorityCheck 是钉住 priority 取值区间的 CHECK 约束表达式，由各表注解注入建表 DDL（§3.1）。
 const PriorityCheck = "priority >= 0 AND priority <= 100"
+
+// BucketCheck 是钉住 hash_bucket 取值区间（0–255）的 CHECK 约束表达式，由含该列的表
+// （pending/schedulable/processing）注解注入建表 DDL（§3.1/§5.2）。
+const BucketCheck = "hash_bucket >= 0 AND hash_bucket <= 255"
 
 // PriorityBand 是任务 topic 使用的优先级档位：§3.2 的 task.{band}。
 //

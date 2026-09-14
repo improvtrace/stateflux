@@ -8,8 +8,8 @@
    §1.2.8）。
 2. 分布式选举逻辑外置：进程通过 RPC 获取当前集群节点信息（成员、角色、调度节点位置）。
 3. 生命周期四阶段（阶段集合为逻辑抽象，下述表名为默认实现的命名，§3.1）：
-   - **创建**：业务在本地事务中调用 PG `enqueue_tasks` 写入 `pending_tasks`、payload 与幂等身份记录；
-   - **调度分发**：经约束晋升（pending → schedulable）后由 `schedulable_tasks` 认领完成，与创建解耦；调度节点全集群唯一；
+   - **创建**：业务在本地事务中调用 PG `enqueue_tasks` 写入 `task_pendings`、payload 与幂等身份记录；
+   - **调度分发**：经约束晋升（pending → schedulable）后由 `task_schedulables` 认领完成，与创建解耦；调度节点全集群唯一；
    - **执行**：所有节点都可执行。调度器经 EventBus 发送任务：同步 RPC channel 立即返回结果；异步 channel 仅确认发送，执行节点稍后发布结果。创建方均通过结果查询获知状态；
    - **归集**：Collector 订阅 EventBus 的结果 topic；direct RPC 返回的结果也适配为同一 `ResultEvent`。所有路径共用终态事务。
 4. 创建与结果归集都支持批处理。
@@ -25,21 +25,20 @@
 | Redis 定位 | 半持久队列 + 执行视图 | 不可靠传输实现；不以 AOF、PEL、ACK 或任何 Redis 状态作正确性前提 |
 | 异步结果 | Worker 经独立通道直接 push | 统一 `ResultEvent` 经 EventBus 归集：同步 RPC 的响应适配为同一事件，Collector 订阅 result topic |
 | 调度节点 | 多调度节点 + 一致性哈希分片 | 调度节点唯一；分片作为阶段 2 的扩展开关 |
-| prepared 候选层 | pending 与认领之间的逻辑队列 | 恢复为物化就绪层 `schedulable_tasks`：约束晋升产出，量级远小于 pending（§5.2） |
+| prepared 候选层 | pending 与认领之间的逻辑队列 | 恢复为物化就绪层 `task_schedulables`：约束晋升产出，量级远小于 pending（§5.2；调度链路不判断时间门槛，任务按约束直接流转） |
 
 ### 1.2 工程原则
 
-1. **PG 是唯一权威**：任务、幂等身份、并发预留与控制面 epoch 只由 PG 决定；EventBus 是无权威、可丢失的通信面。
-2. **先认领、后调用**：任何外部调用（RPC/入队）前，任务必须已在 PG 中完成认领（进入 `processing_tasks`）。
+1. **PG 是唯一权威**：任务与幂等身份只由 PG 决定；EventBus 是无权威、可丢失的通信面。
+2. **先认领、后调用**：任何外部调用（RPC/入队）前，任务必须已在 PG 中完成认领（进入 `task_processings`）。
 3. **批量写 PG、窄通道通信**：PG 写全部批量化；跨节点通信面保持最小且可审计。
-4. **执行节点不持有权威状态**：崩溃即丢失，由租约到期 + 对账接管重派。
+4. **执行节点不持有权威状态**：崩溃即丢失，由对账超时（R1）接管重派。
 5. **投递语义 at-least-once，业务幂等是安全前提**。
-6. **选举外置但控制面必须自我 fencing**：`ClusterView` 决定谁有资格尝试运行控制面；PG `control_leases` 生成单调 epoch，并为晋升、认领、重置和终态控制操作附加 fence。外部选举短暂双主不能突破并发约束或让陈旧控制面继续写入。
-7. **调度侧集权、执行侧无状态**：任务的路由分发（选节点/选 channel/优先级）、并发约束与业务约束
+6. **调度侧集权、执行侧无状态**：任务的路由分发（选节点/选 channel/优先级）、并发约束与业务约束
    全部留在调度侧（§5.2/§5.3）；执行侧不做任何调度决策，只订阅任务、执行 handler、发布结果——
    本地结果 WAL 与容量上报是易失的派生数据而非权威状态（呼应第 4 条）。执行侧因此可随时增减、
    崩溃无损失，扩容就是加进程。
-8. **服务优先（v3.9 修订，v3.10 以 internal/ 机制固化）**：本项目交付的是**独立部署的分布式任务
+7. **服务优先（v3.9 修订，v3.10 以 internal/ 机制固化）**：本项目交付的是**独立部署的分布式任务
    调度服务**——单一官方二进制（`cmd/stateflux` 入口 + `internal/server` 编排装配）即产品本体；
    各运行时与角色包（biz/runtime（scheduler/collector/reconcile）/worker/factory/dispatch）是
    服务的引擎内部组件，置于 `internal/` 之下，「不作为三方库对外承诺 API、不支持嵌入业务进程」由
@@ -57,7 +56,7 @@
 ```mermaid
 flowchart LR
     C["业务方<br/>本地事务 enqueue_tasks · 直查 task_results"]
-    PG[("PostgreSQL 任务表组 —— 唯一权威<br/>四阶段账本 · 结果 · 幂等/名额/control epoch")]
+    PG[("PostgreSQL 任务表组 —— 唯一权威<br/>四阶段账本 · 结果 · 幂等账本")]
     EB["EventBus —— 唯一节点通信面（best-effort）<br/>channel 实现：RPC · gRPC stream · Redis list/zset/stream/pubsub"]
     S["控制面 Runtime（全集群唯一，外部选举指定）<br/>Scheduler · Collector · Reconciler"]
     W["Worker 运行时（所有节点常驻）<br/>订阅任务 · 执行 Handler · 结果 WAL"]
@@ -86,8 +85,9 @@ flowchart LR
 - 集群里运行同一个二进制 `stateflux` 的 N 个实例，每个实例通过 `ClusterView`（外部选举服务的 RPC
   客户端）周期性获取节点信息：节点 ID/地址/角色/能力标签 + 当前调度节点 ID。
 - 角色启用：**Worker 运行时（含 biz 业务实现）所有实例常驻**；**控制面运行时 Runtime
-  （Scheduler/Collector/Reconciler）** 仅在外部选举指向本实例且已取得 PG 控制租约时运行；故障切换后
-  新调度节点以新 epoch 从 PG 自然接管。路由、并发与业务约束全部在 Scheduler 内（§1.2.7）；
+  （Scheduler/Collector/Reconciler）** 仅在外部选举指向本实例时运行；故障切换后由选举切换自然接管
+  （不做 PG fencing，短暂双主窗口由 R1/attempt 幂等收敛，§6.2）。路由、并发与业务约束全部在
+  Scheduler 内（§1.2.7）；
   Worker 实例只执行，无差别可替换。
 - 单机/开发模式：`cluster.static` 把全部角色赋给本进程，一个进程闭环。
 - 角色分离部署（预留，§1.2.8）：`ClusterView`/角色开关支持把 Worker 角色单独成进程（专用执行

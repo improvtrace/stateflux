@@ -1,0 +1,11 @@
+// service.proto —— 节点业务执行能力契约（proto3）。
+//
+// 定位：每个节点向外提供用户自定义的业务执行能力（无状态，§1.2.8/§5.4）——
+// 执行侧不持有权威状态、可随时增减，崩溃无损失。业务实现由 biz 承载，本契约
+// 只描述执行接入面。生成码仅模块内 import。
+// 消息与服务定义按设计文档在实施阶段落定，当前仅占位包名与路径。
+syntax = "proto3";
+
+package stateflux.worker.v1;
+
+option go_package = "github.com/improvtrace/stateflux/api/stateflux/worker/v1;workerv1";

@@ -1,0 +1,10 @@
+// consensus.proto —— 节点间共识信息管理契约（proto3）。
+//
+// 定位：管理跨节点的共识/协调信息——节点成员视图、调度节点位置、控制面互斥等
+// 一致性信息在节点间的同步与裁决。生成码仅模块内 import。
+// 消息与服务定义按设计文档在实施阶段落定，当前仅占位包名与路径。
+syntax = "proto3";
+
+package stateflux.coherence.v1;
+
+option go_package = "github.com/improvtrace/stateflux/api/stateflux/coherence/v1;coherencev1";

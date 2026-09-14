@@ -12,14 +12,14 @@
 4. Collector 订阅 `result` topic；默认 Worker→调度节点为 gRPC 双向 ResultStream，但可替换为任何
    Redis channel。同步 Execute 的响应也转换为 ResultEvent。
 5. `task_identities(idempotency_key)` 提供全实例幂等；本期不引入 tenant，接入方负责键的全局唯一性。
-6. control epoch、并发 reservation、attempt fence 保持在 PG；attempt 只在 claim 加一。
+6. attempt fence 保持在 PG；attempt 只在 claim 加一。
 7. channel 失败统一由 R1 重置 processing 并重试，故业务 handler 必须幂等。
 
 ## 10. 默认参数
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
-| claim batch / tick | 500 / 100ms | 受 worker credit 与并发 reservation 收缩。 |
+| claim batch / tick | 500 / 100ms | 受 worker credit 收缩。 |
 | promotion tick | 200ms | NOTIFY 仅是唤醒优化。 |
 | direct RPC pool | 512 | request/reply channel 并发上限。 |
 | dispatch grace | 90s | 通道无结果前不重试的最小窗口。 |
@@ -31,7 +31,7 @@
 5k task/s 仍是压测目标，口径为**单调度节点**（claim、晋升与结果归集同在该节点，§11）。不同 Redis
 channel 的吞吐/持久特性只影响延迟、成本和恢复速度，不能改变正确性指标；压测必须包含断开 RPC
 stream、丢弃 Redis 全部数据、重复 ResultEvent 与 Send 不确定结果。
-表中 `skew` 以及 worker credit、dedupe 窗口、对账周期等尚未定稿的参数见 §14.6–§14.13。
+表中 `skew` 以及 worker credit、dedupe 窗口、对账周期等尚未定稿的参数见 §14.6–§14.12。
 
 ## 11. 扩展路径
 

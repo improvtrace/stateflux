@@ -2,6 +2,42 @@
 
 > 当前版本见 [README](./README.md)；各主题文件头部标注所对应的版本。
 
+## v3.21（2026-09-14）：任务行模型重构——run_at 退役、调度目标节点属性与公共段/阶段段
+
+- **`run_at` 全链退役**（四表均移除）：调度（晋升与认领）不再判断时间门槛，延迟任务语义移除；
+  R1 重置后立即重新可认领（无退避），重试防打爆依赖 `max_attempts`/R3；晋升与认领排序均只按
+  `priority DESC`，两处扫描索引改为 `(priority DESC)`；
+- **死列清理**：`error` 收敛为 completed 专有列——它只在终态写入，pending/schedulable/processing 中
+  恒为零值，全部移除；pending 移除 `attempts`/`claimed_node`（claim 才产生，从未认领的行恒为零值）；
+- **认领节点列统一更名为 `claimed_node`**（原 `owner_node`）：schedulable=上次认领节点（重置后
+  保留上次值）、processing=本次认领节点、completed=最后认领节点（均为诊断/审计用途）；
+- **调度目标节点属性**：`vpc`/`node`/`label` 属公共段（`label` 随行保留至终态，completed 审计
+  留档），`hash_bucket` 存在于 pending/schedulable/processing（认领消费后不入终态）。`label` 是
+  期望执行节点的匹配标签（自由文本、空串=不限）；`hash_bucket` 是 0–255 整数分桶（Int16，
+  `BucketCheck` 钉住区间），0=不限、接入方自定义语义、框架只做等值匹配；二者在晋升与认领时过滤；
+- **字段语义分类**：`vpc`/`node`/`label`/`hash_bucket` 为**调度目标节点属性**（调度时据此筛选目标
+  节点），`biz_race_labels`/`biz_race_entry`/`biz_group`/`biz_batch_id` 为**业务属性**（业务写入，
+  框架不解释或仅按文档用途消费）；
+- **业务字段更名与并发约束字段**：`group`→`biz_group`、`batch_id`→`biz_batch_id`（消除与 PG 保留字
+  的重名）；新增 `biz_race_labels`（字符串数组）与 `biz_race_entry`（字符串）作为**业务并发约束**
+  ——entry 唯一标识业务对象、labels 声明约束标签集合，由调度侧实施并发控制（机制待定，§14）；
+  公共段扩至 19 列；
+- **payload 归位 `task_results`**：`task_completeds` 不再内联 payload（终态历史只留 outcome/error
+  摘要与时间），`task_results` 新增 `payload`（终态事务内从 `task_payloads` 合并入行）——任务载荷与
+  业务结果同表、保留期统一，历史表更瘦；
+- **schema 迁移 SQL 与索引延后**：新增 `internal/domain/migration/000001_20260914_create_task_tables.sql`
+  创建全部 7 张表（命名格式 `{6位版本}_{日期}_{描述}.sql`，按版本序增量执行；表注释独立于
+  次级索引本期不建（延后优化）；表注释机制一并移除（ent 不支持表级注释）；
+- **移除并发名额与控制租约机制**（含 `concurrency_reservations`、`control_leases` 两表）：claim
+  不做名额预留（并发上限控制移出本期范围，按组限流需另行设计）；控制面互斥仅由外部选举承担、
+  不做 PG fencing，双主窗口内的控制面周期操作靠幂等收敛；`control_epoch` 相关表述、指标
+  （`control.fence_rejects`、`concurrency.reservations`）与 §14 中名额/租约待定项一并移除；
+  对账周期收敛为 R1–R4（原 R5 名额修复随之取消）；
+- **四表字段模型改为「公共段 + 阶段段」**：公共段 17 列（含 label）四表一致、增删四处同步；
+  阶段段按需取舍（attempts/claimed_node 在 schedulable/processing/completed；hash_bucket 在
+  pending/schedulable/processing；error 仅 completed）；字段顺序四表统一。v3.20 的「任一列增删
+  必须四处同步」就此修订。
+
 ## v3.20（2026-09-12）：调度约束字段、数值枚举与注释
 
 - 任务行新增两个**业务无关的调度约束**字段：`vpc`（目标网络域）与 `node`（期望执行节点），创建时

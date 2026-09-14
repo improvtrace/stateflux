@@ -15,9 +15,9 @@ stateflux/
 │   ├── server/       # 编排层：biz + scheduler 运行时 + worker 运行时的装配与启停 + Handler 注册点（§1.2.8）
 │   ├── biz/          # task/v1 服务端业务：Execute 执行编排 / Collect 结果上报（经 server 装配注入 worker）
 │   ├── runtime/      # 控制面（调度侧）运行时归组：随选举启停，仅调度节点运行
-│   │   ├── scheduler/  # fenced 晋升/原子名额 claim → EventBus channel 分发
-│   │   ├── collector/  # 订阅 ResultEvent → fenced 终态事务/回调派生
-│   │   └── reconcile/  # R1~R5（通道丢失、Redis 灾难、名额修复）
+│   │   ├── scheduler/  # 约束晋升/claim → EventBus channel 分发
+│   │   ├── collector/  # 订阅 ResultEvent → 终态事务/回调派生
+│   │   └── reconcile/  # R1~R4（通道丢失、Redis 灾难）
 │   ├── worker/       # 订阅任务/执行/结果 WAL/发布 ResultEvent + task/v1 gRPC adapter
 │   ├── task/         # 任务构建与分发：factory + dispatch（子包相互独立、零依赖）
 │   │   ├── factory/  #   TaskFactory 周期任务生成（仅调度节点运行）
@@ -27,17 +27,17 @@ stateflux/
 │   │   │             #   task.go（Task/channel/TaskRepository/CreatedTask/PromoteOptions）
 │   │   │             #   callback.go（CallbackSpec）、result.go（Outcome/TaskResult/ResultRepository/
 │   │   │             #   TerminalEntry/RequeueEntry）、ops.go（OpsRepository/DeadTask）、
-│   │   │             #   store.go（组合根 Store）、identity.go/control.go（幂等账本/epoch lease）、errors.go、handler.go（Handler/Registry/Precondition）、
+│   │   │             #   store.go（组合根 Store）、identity.go（幂等账本）、errors.go、handler.go（Handler/Registry/Precondition）、
 │   │   │             #   retry.go（Backoff/NonRetryable）、snowflake.go（任务 ID 生成）
-│   │   ├── repository/ # 函数写入面/晋升/fenced claim/终态/对账/查询；ent 类型安全 API，
-│   │   │             #     identity upsert + 条件名额预留承载幂等与并发，FOR UPDATE 承载 attempt
-│   │   │             #     fencing；仅认领挪行 SKIP LOCKED 单条 SQL 经 ent 连接原生下沉，§3.1）
+│   │   ├── repository/ # 函数写入面/晋升/claim/终态/对账/查询；ent 类型安全 API，
+│   │   │             #     identity upsert 承载幂等，FOR UPDATE 承载 attempt fencing；
+│   │   │             #     仅认领挪行 SKIP LOCKED 单条 SQL 经 ent 连接原生下沉，§3.1）
 │   │   ├── data/     # 数据源基建：pg 连接池 + ent client、redis client（双栈在此被使用，不设显式
 │   │   │             #     pg/redis 子包；ent 生成码由 make generate 产出，不入库）
 │   │   ├── cacheview/ # 可选 Redis 观测/容量提示（非正确性路径）
-│   │   ├── migration/ # 数据面迁移：enqueue 函数、权限、索引/触发器 + ent migrations + 表注释
-│   │   │             #     （table_comments.sql：ent 不生成 COMMENT ON TABLE，§3.1）
-│   │   └── schema/   # ent 表定义（四阶段 + payload/result + identity/reservation/control lease；生成码依赖 ent，
+│   │   ├── migration/ # 数据面迁移：结构迁移 SQL（{版本}_{日期}_{描述}.sql）+ ent migrations；
+│   │   │             #     enqueue 函数与最小权限由后续版本文件补齐（§3.1/§5.1）
+│   │   └── schema/   # ent 表定义（四阶段 + payload/result + identity；生成码依赖 ent，
 │   │   │             #     输出至 domain/data/ent，不入库）；列注释随 .Comment() 写进 DDL，枚举为数值编码
 │   ├── eventbus/     # 逻辑 topic 与 Send/Subscribe（§3.2）；channel/ 是唯一节点通信抽象，
 │   │   │             #   rpc/、redis/ 只是实现——任何实现都不得以 broker 持久性或 ack 提升可靠性
@@ -62,13 +62,13 @@ biz/runtime/worker 相互零依赖——调度↔执行仅经 `api/stateflux/tas
 （RPC / gRPC stream / Redis 可替换的传输实现，dispatch 为调度侧分发编排）传递，全服务只有一条
 PG 终态写路径（§5.5）。`domain` 为领域模型 +
 纯接口层（§3.1 阶段集合抽象）：按聚合拆分为 TaskRepository（创建/晋升/
-fenced 认领）、ResultRepository（终态事务/重置/查询）与 OpsRepository（控制 lease、对账扫描/死信运维/工厂判定），
+认领）、ResultRepository（终态事务/重置/查询）与 OpsRepository（对账扫描/死信运维/工厂判定），
 组合根 Store 供装配整体注入；消费侧按需依赖窄聚合接口（promoter/scheduler → Task，
 collector → Result，跨聚合的 reconcile/factory/biz → Store）。默认 ent + PG 实现独立成
 `domain/repository` + `domain/data` + `domain/schema` + `domain/migration`（ent 生成码随 data），
 可整体替换而不改变调度与执行语义。仓储读写一律走 ent 类型安全 API（ent 特性
-`sql/upsert` / `sql/lock` / `sql/execquery`），仅两处例外经 ent 连接原生下沉：fenced claim（候选、
-条件名额预留与搬迁必须同事务）与迁移引导 DDL（写入函数、权限、索引/触发器）。
+`sql/upsert` / `sql/lock` / `sql/execquery`），仅两处例外经 ent 连接原生下沉：claim（候选与搬迁
+必须同事务）与迁移引导 DDL（写入函数、权限、索引/触发器）。
 
 **可见性规则（v3.10 修订的核心动机；v3.11 曾增补 sdk 例外，v3.15 收回）**：
 

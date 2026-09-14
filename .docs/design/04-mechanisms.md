@@ -12,20 +12,17 @@
 | Redis 全量丢失或重启 | 不恢复 Redis 状态；按 PG 扫 processing，R1 批量重投。 |
 | worker 在 handler/发布结果/WAL 后宕机 | WAL 重放并重发 ResultEvent；WAL 损坏则 R1 重跑。 |
 | Collector 终态提交后 channel 返回失败 | 重复 ResultEvent 被 attempt/结果唯一性拒绝；不重复终态或 callback。 |
-| 外部选举短暂双主 | 当前 `control_leases` epoch 拒绝陈旧控制写；attempt 拒绝陈旧执行结果。 |
+| 外部选举短暂双主 | `attempt` 拒绝陈旧执行结果；控制面互斥由外部选举承担（不做 PG fencing，双主窗口内的控制面周期操作靠幂等收敛）。 |
 
 ### 6.2 Fence 与对账
 
-attempt fence 覆盖结果、重试、死信和 callback；control epoch 覆盖晋升、claim、R1/R3 与终态控制写。
-新 epoch 可归集旧 epoch claim 的有效结果，但必须验证 task attempt，不能要求任务行记录的历史 epoch 等于
-当前 epoch。
+attempt fence 覆盖结果、重试、死信和 callback；陈旧结果必须验证 task attempt。
 
-- **R1**：processing 超过 `max(timeout, dispatch_grace) + skew` 且未终态，释放名额并移回
-  schedulable，写 full-jitter 退避；不增加 attempts。
+- **R1**：processing 超过 `max(timeout, dispatch_grace) + skew` 且未终态，移回
+  schedulable；不增加 attempts（v3.21 起 run_at 退役，无退避，重置后立即重新可认领）。
 - **R2**：清理可选 Redis 容量提示视图（`domain/cacheview`，§8）；不据此修改 PG。
-- **R3**：重试时若 `attempts >= max_attempts`，事务内释放名额并写 `completed{dead}`。
+- **R3**：重试时若 `attempts >= max_attempts`，事务内写 `completed{dead}`。
 - **R4**：Redis 或所有 channel 不可用后的 PG 扫描重投；没有“恢复消息队列”的正确性步骤。
-- **R5**：由 processing 聚合重算并发 reservation，修复异常退出造成的漂移。
 
 ### 6.3 Channel 能力与运行规则
 
@@ -42,10 +39,9 @@ pub/sub 是异步广播。所有实现须：携带 task_id/attempt/correlation_i
 
 OpenTelemetry 指标统一带 `stateflux.` 前缀：`stateflux.eventbus.send`、`stateflux.eventbus.subscribe`、
 `stateflux.eventbus.errors`（channel/kind 标签）、`stateflux.collector.results`、
-`stateflux.reconcile.resets`、`stateflux.control.fence_rejects`、`stateflux.wal.backlog.entries` /
-`.bytes`、`stateflux.handler.duration` 与 `stateflux.concurrency.reservations`。禁止
-task_id/idempotency_key 作为标签。水位型指标（wal.backlog、concurrency.reservations）用同步
-Int64Gauge，采集点收敛在既有写路径，免去回调装配。Redis 指标只用于诊断，不作为 SLO 的正确性来源。
+`stateflux.reconcile.resets`、`stateflux.wal.backlog.entries` / `.bytes` 与
+`stateflux.handler.duration`。禁止 task_id/idempotency_key 作为标签。水位型指标（wal.backlog）用
+同步 Int64Gauge，采集点收敛在既有写路径，免去回调装配。Redis 指标只用于诊断，不作为 SLO 的正确性来源。
 
 ## 7. RPC 契约
 

@@ -12,7 +12,7 @@ import (
 
 // TaskPayload holds the schema definition for the TaskPayload entity.
 // task_payloads：payload 分离表（§3.1）——阶段表查询面不背 payload；
-// 终态搬移时合并入 completed 后删除分离行（§5.5，同一事务）。
+// 终态搬移时合并入 task_results 后删除分离行（§5.5，同一事务）。
 // 字段一行一条；列注释随 ent 生成落到 DDL（entsql.WithComments）。
 type TaskPayload struct {
 	ent.Schema
@@ -32,7 +32,7 @@ func (TaskPayload) Edges() []ent.Edge {
 	return nil
 }
 
-// Annotations 显式表名 + 列注释落 DDL（表注释见 migration 引导 DDL）。
+// Annotations 显式表名 + 列注释落 DDL。
 func (TaskPayload) Annotations() []schema.Annotation {
 	return []schema.Annotation{
 		entsql.Annotation{Table: "task_payloads"},

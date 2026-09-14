@@ -12,10 +12,9 @@ identity、payload 与 pending 并返回 task ID；重复请求在 dedupe 窗口
 
 ### 5.2 晋升与认领
 
-Promoter 仅判断 run_at 与纯前置条件（含 `vpc`/`node` 等业务无关调度约束，§3.1），批量
-`pending → schedulable`。控制面必须持有 PG epoch；claim 事务按同一组约束筛选候选、原子预留
-`concurrency_reservations`，迁移到 processing 并递增 attempts。名额、attempt 与 epoch 均由 PG 裁决，
-不能由 channel 或 worker 本地状态裁决。
+Promoter 仅判断纯前置条件（含 `vpc`/`node`/`label`/`hash_bucket` 等调度目标节点属性，§3.1），批量
+`pending → schedulable`。claim 事务按同一组约束筛选候选，迁移到 processing 并递增 attempts。
+attempt 由 PG 裁决，不能由 channel 或 worker 本地状态裁决。
 
 ### 5.3 通过 EventBus 分发
 
@@ -29,7 +28,7 @@ sequenceDiagram
     participant B as EventBus
     participant W as Worker
     participant C as Collector
-    S->>P: fenced CLAIM (attempt +1)
+    S->>P: CLAIM (attempt +1)
     alt request/reply RPC channel
         S->>W: Call(TaskMessage)
         W-->>S: ResultEvent
@@ -58,16 +57,16 @@ worker 不直接写 PG 终态，也不决定重试。可选的 Redis 容量提�
 ### 5.5 订阅归集与重试
 
 Collector 订阅 result topic，将 RPC 适配结果与异步 worker 结果汇入一个批处理器。每条结果通过一次
-PG 事务：验证 attempt 与当前 control epoch → 释放名额 → processing 迁移 completed、合并 payload、
-写入不可变 `task_results`、派生 callback、写墓碑。墓碑即 `task_results` 的 `task_id` 主键终态行：
+PG 事务：验证 attempt → processing 迁移 completed、payload 合并入
+`task_results`、派生 callback、写墓碑。墓碑即 `task_results` 的 `task_id` 主键终态行：
 重复 ResultEvent 因主键冲突被拒，不再产生副作用。
 
-可重试失败只回 schedulable 并写 full-jitter 退避，**不增加 attempts**；下次 claim 才会生成新 fence。
+可重试失败只回 schedulable，**不增加 attempts**（v3.21 起 run_at 退役、无退避，重置后立即重新可认领）；下次 claim 才会生成新 fence。
 如果 ResultEvent 永远没有抵达（包括 Redis 全丢），R1 在 `max(timeout, dispatch_grace) + skew` 后重置
 processing，因此正确性不依赖 EventBus 可达。
 
 ### 5.6 工厂与回调
 
-TaskFactory 和 callback 仍只创建一次性任务；Factory 仅在持有 control epoch 的节点运行，错过周期窗口
-跳过。Factory 生成的任务在任务行记录 `batch_id`，`completed_tasks` 按该列建索引供工厂孤儿判定使用。
+TaskFactory 和 callback 仍只创建一次性任务；Factory 仅在当选的调度节点运行，错过周期窗口
+跳过。Factory 生成的任务在任务行记录 `batch_id`，`task_completeds` 按该列建索引供工厂孤儿判定使用。
 OnSuccess/OnError 在终态事务内按 `parent:attempt:outcome` 幂等键派生，深度上限 8。
