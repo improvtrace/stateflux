@@ -2,7 +2,9 @@
 // +build wireinject
 
 // 本文件是 wire 注入声明（§15.1#1）：项目启动依赖 wire 生成装配代码。
-// 运行 `wire ./internal/server` 生成 wire_gen.go（或 `go generate ./internal/server`）。
+// 运行 `make wire`（等价 `wire ./internal/server`）生成 wire_gen.go。
+//
+//go:generate wire
 package server
 
 import (

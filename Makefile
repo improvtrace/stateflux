@@ -1,4 +1,4 @@
-.PHONY: build vet fmt api generate clean
+.PHONY: build vet fmt api generate wire clean
 
 GO ?= go
 
@@ -29,6 +29,10 @@ ifneq ($(strip $(API_PROTO_FILES)),)
 else
 	@echo "api/ 下没有 .proto 文件，跳过生成"
 endif
+
+# wire 依赖注入代码生成（§15.1#1）：需要 github.com/google/wire/cmd/wire 在 PATH 内。
+wire:
+	wire ./internal/server
 
 # ent 代码生成（schema 位于 internal/domain/schema，输出至 internal/domain/data/ent；
 # 生成码不入库——.gitignore 已排除，克隆/拉取后需先执行本目标）

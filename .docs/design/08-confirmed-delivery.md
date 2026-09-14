@@ -62,3 +62,30 @@ internal/
    不自行分配（呼应 §1.2.7 调度侧集权）。
 4. **转发不改变归属**：`internal/forward` 只做 RPC 中转（携 `visited` 环路保护与 TTL），
    不产生新的调度决策。
+
+## 15.4 实施状态（v4.0 落地）
+
+| 条款 | 状态 | 证据 |
+| --- | --- | --- |
+| 1 wire 注入 | ✅ | `internal/server/wire.go` + `wire_gen.go`（`make wire`）；`cmd/stateflux` 仅调用 `server.InitializeApplication` |
+| 2 实现落 biz | ✅ | `internal/biz` 实现 executor/capability/dispatch/coherence 服务端 + factory/handler/能力 |
+| 3 cluster http/grpc | ✅ | `api/cluster/v1`（vpc/label/roles/capabilities）、`internal/cluster`（grpc/http/static + Cache）、`config.Cluster` |
+| 4 coherence | ✅ | `api/stateflux/coherence/v1` + `biz.CoherenceStore/Allocator/Pusher/Syncer/Puller` |
+| 5 dispatch 语义/投递/转发 | ✅ | `api/dispatch/v1` + `biz.DispatchServer` + `task/dispatch.Dispatcher`（三种语义、两种投递、转发） |
+| 6 forward | ✅ | `api/stateflux/forward/v1` + `internal/forward`（环路/TTL 保护） |
+| 7 worker 能力 | ✅ | `api/stateflux/worker/v1`（ListCapabilities/Invoke/VerifyPassword/UploadFile）+ biz SSH/SFTP 实现 |
+| 8 worker 组织能力 | ✅ | `internal/worker` 的 `Capability`/`Registry`/`HandlerRegistry`/`Runtime`/`WAL`；RPC 适配在 biz |
+| 9 cacheview | ✅ | `internal/domain/cacheview`（任务状态、去重、在途计数、队列路由；Redis/Mem 双实现） |
+| 10 obs | ✅ | `internal/obs`（§6.4 指标 + dispatch/forward/coherence/capability/factory 指标 + OTel 装配） |
+| 11 runtime/scheduler 多实例 | ✅ | `runtime/scheduler` 的 `Trigger`（tick/notify/coherence/manual）+ `Scheduler`/`Group` |
+| 12 task 管理 factory | ✅ | `internal/task`（`Task`/`Registry`）+ `task/factory`（Factory 注册与运行器）；实现在 biz |
+| 13 machinery 风格 codec | ✅ | `internal/task/codec`（签名 + 消息体帧） |
+
+验证命令：
+```bash
+make api && make generate && make wire && make build && make vet
+STATEFLUX_TEST_DSN='postgres://stateflux:stateflux@127.0.0.1:5432/stateflux?sslmode=disable' go test ./...
+```
+
+端到端冒烟（本地 PG+Redis）：factory → enqueue → promote → claim → Redis 队列分发 → worker
+（codec 解码/执行）→ gRPC ResultStream → collector → `task_completeds`/`task_results`，已实测完成。
