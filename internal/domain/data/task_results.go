@@ -10,18 +10,18 @@ import (
 
 // taskResultsRepo 是 repository.TaskResultsRepository 的 ent 实现（§3.1/§5.5）。
 type taskResultsRepo struct {
-	client *ent.Client
+	data *Data
 }
 
-// NewTaskResults 构造 task_results 仓储；事务内复用时传入 tx.Client()。
-func NewTaskResults(client *ent.Client) repository.TaskResultsRepository {
-	return &taskResultsRepo{client: client}
+// NewTaskResults 从 Data 构造仓储；事务内的仓储请经 d.WithTx(tx) 构造（§5.2/§5.5）。
+func NewTaskResults(data *Data) repository.TaskResultsRepository {
+	return &taskResultsRepo{data: data}
 }
 
 func (r *taskResultsRepo) Create(ctx context.Context, results []*ent.TaskResult) ([]bool, error) {
 	created := make([]bool, len(results))
 	for i, result := range results {
-		err := r.client.TaskResult.Create().
+		err := r.data.db.TaskResult.Create().
 			SetID(result.ID).
 			SetOutcome(result.Outcome).
 			SetAttempt(result.Attempt).
@@ -44,5 +44,5 @@ func (r *taskResultsRepo) Create(ctx context.Context, results []*ent.TaskResult)
 }
 
 func (r *taskResultsRepo) Get(ctx context.Context, taskID int64) (*ent.TaskResult, error) {
-	return r.client.TaskResult.Query().Where(taskresult.ID(taskID)).Only(ctx)
+	return r.data.db.TaskResult.Query().Where(taskresult.ID(taskID)).Only(ctx)
 }

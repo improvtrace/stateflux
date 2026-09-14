@@ -11,19 +11,19 @@ import (
 
 // taskIdentitiesRepo 是 repository.TaskIdentitiesRepository 的 ent 实现（§3.1/§5.1）。
 type taskIdentitiesRepo struct {
-	client *ent.Client
+	data *Data
 }
 
-// NewTaskIdentities 构造 task_identities 仓储；事务内复用时传入 tx.Client()。
-func NewTaskIdentities(client *ent.Client) repository.TaskIdentitiesRepository {
-	return &taskIdentitiesRepo{client: client}
+// NewTaskIdentities 从 Data 构造仓储；事务内的仓储请经 d.WithTx(tx) 构造（§5.2/§5.5）。
+func NewTaskIdentities(data *Data) repository.TaskIdentitiesRepository {
+	return &taskIdentitiesRepo{data: data}
 }
 
 func (r *taskIdentitiesRepo) Put(ctx context.Context, identities []*ent.TaskIdentity) ([]int64, []bool, error) {
 	ids := make([]int64, len(identities))
 	created := make([]bool, len(identities))
 	for i, identity := range identities {
-		err := r.client.TaskIdentity.Create().
+		err := r.data.db.TaskIdentity.Create().
 			SetID(identity.ID).
 			SetIdempotencyKey(identity.IdempotencyKey).
 			Exec(ctx)
@@ -45,9 +45,9 @@ func (r *taskIdentitiesRepo) Put(ctx context.Context, identities []*ent.TaskIden
 }
 
 func (r *taskIdentitiesRepo) GetByIdempotencyKey(ctx context.Context, idempotencyKey string) (*ent.TaskIdentity, error) {
-	return r.client.TaskIdentity.Query().Where(taskidentity.IdempotencyKey(idempotencyKey)).Only(ctx)
+	return r.data.db.TaskIdentity.Query().Where(taskidentity.IdempotencyKey(idempotencyKey)).Only(ctx)
 }
 
 func (r *taskIdentitiesRepo) DeleteCreatedBefore(ctx context.Context, cutoff time.Time) (int, error) {
-	return r.client.TaskIdentity.Delete().Where(taskidentity.CreatedAtLT(cutoff)).Exec(ctx)
+	return r.data.db.TaskIdentity.Delete().Where(taskidentity.CreatedAtLT(cutoff)).Exec(ctx)
 }

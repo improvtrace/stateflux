@@ -10,12 +10,12 @@ import (
 
 // taskPendingsRepo 是 repository.TaskPendingsRepository 的 ent 实现（§3.1）。
 type taskPendingsRepo struct {
-	client *ent.Client
+	data *Data
 }
 
-// NewTaskPendings 构造 task_pendings 仓储；事务内复用时传入 tx.Client()。
-func NewTaskPendings(client *ent.Client) repository.TaskPendingsRepository {
-	return &taskPendingsRepo{client: client}
+// NewTaskPendings 从 Data 构造仓储；事务内的仓储请经 d.WithTx(tx) 构造（§5.2/§5.5）。
+func NewTaskPendings(data *Data) repository.TaskPendingsRepository {
+	return &taskPendingsRepo{data: data}
 }
 
 func (r *taskPendingsRepo) Create(ctx context.Context, tasks []*ent.TaskPending) error {
@@ -24,7 +24,7 @@ func (r *taskPendingsRepo) Create(ctx context.Context, tasks []*ent.TaskPending)
 	}
 	builders := make([]*ent.TaskPendingCreate, 0, len(tasks))
 	for _, t := range tasks {
-		builders = append(builders, r.client.TaskPending.Create().
+		builders = append(builders, r.data.db.TaskPending.Create().
 			SetID(t.ID).
 			SetType(t.Type).
 			SetOperator(t.Operator).
@@ -46,22 +46,22 @@ func (r *taskPendingsRepo) Create(ctx context.Context, tasks []*ent.TaskPending)
 			SetCreatedAt(t.CreatedAt).
 			SetUpdatedAt(t.UpdatedAt))
 	}
-	_, err := r.client.TaskPending.CreateBulk(builders...).Save(ctx)
+	_, err := r.data.db.TaskPending.CreateBulk(builders...).Save(ctx)
 	return err
 }
 
 func (r *taskPendingsRepo) ListForPromotion(ctx context.Context, limit int) ([]*ent.TaskPending, error) {
-	return r.client.TaskPending.Query().
+	return r.data.db.TaskPending.Query().
 		Order(ent.Desc(taskpending.FieldPriority)).
 		Limit(limit).
 		All(ctx)
 }
 
 func (r *taskPendingsRepo) DeleteByIDs(ctx context.Context, ids []int64) error {
-	_, err := r.client.TaskPending.Delete().Where(taskpending.IDIn(ids...)).Exec(ctx)
+	_, err := r.data.db.TaskPending.Delete().Where(taskpending.IDIn(ids...)).Exec(ctx)
 	return err
 }
 
 func (r *taskPendingsRepo) Get(ctx context.Context, taskID int64) (*ent.TaskPending, error) {
-	return r.client.TaskPending.Query().Where(taskpending.ID(taskID)).Only(ctx)
+	return r.data.db.TaskPending.Query().Where(taskpending.ID(taskID)).Only(ctx)
 }

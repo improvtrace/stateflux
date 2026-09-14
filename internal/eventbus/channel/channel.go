@@ -87,7 +87,7 @@ type Envelope struct {
 }
 
 // Handler 处理订阅到的信封。返回错误表示本次处理失败：best-effort 契约下实现只需记录指标，
-// 不要求重投——是否需要重跑由 PG 对账（R1–R5）决定，而不是由通道决定。
+// 不要求重投——是否需要重跑由 PG 对账（R1–R4）决定，而不是由通道决定。
 type Handler func(ctx context.Context, env Envelope) error
 
 // Subscription 是订阅句柄；Close 之后实现不得再回调 Handler。Close 幂等。
@@ -95,27 +95,34 @@ type Subscription interface {
 	Close() error
 }
 
-// Publisher 单向发送：既覆盖 Redis list/zset/stream/pubsub，也覆盖全双工 stream 的发送侧。
-type Publisher interface {
-	Send(ctx context.Context, env Envelope) error
-}
-
 // Subscriber 订阅一个 topic 并持续回调。
 type Subscriber interface {
 	Subscribe(ctx context.Context, topic Topic, h Handler) (Subscription, error)
 }
 
-// Requester 是半双工 request/reply：发送请求并阻塞等待一个应答（unary RPC）。
+// Requester 是发送与请求的统一入口：发出一个信封并阻塞等待返回。单向发送与半双工
+// request/reply 由同一个 Call 承载，应答语义在返回信封上标记：
+//
+//   - 应答型实现（Capabilities().RequestReply == true）返回对端的真实应答信封；
+//   - 单向实现（RequestReply == false，Redis list/zset/stream/pubsub 与全双工 stream 的
+//     发送侧）返回**零值信封**——它只是「已尝试发送」的确认，不承载任何业务语义，
+//     调用方不得据此推断任务是否被执行（§5.3）。
+//
+// 因此不再需要独立的 Publisher 契约；发送错误同样不得推断为任务未执行，
+// 收敛一律由 PG 对账完成（R1–R4）。
 type Requester interface {
 	Call(ctx context.Context, env Envelope) (Envelope, error)
 }
 
-// Channel 是所有实现的最小契约：能力用 Capabilities 声明，不要用类型断言猜（§9.3）。
+// Channel 是所有实现的最小契约：发送/请求（Requester）+ 能力自声明（Capabilities），
+// 不要用类型断言猜（§9.3）。订阅是可选能力（Subscriber）。
 type Channel interface {
+	Requester
+
 	Kind() Kind
 	Capabilities() Capabilities
 }
 
 // ErrUnsupported 表示实现不具备被请求的能力，调用方应回落到该任务配置的其他 channel，
 // 而不是在本实现上重试。
-var ErrUnsupported = errors.New("eventbus/channel: 实现不支持该能力")
+var ErrUnsupported = errors.New("eventbus/channel: capability not supported by this implementation")

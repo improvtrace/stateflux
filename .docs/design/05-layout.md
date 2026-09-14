@@ -41,8 +41,9 @@ stateflux/
 │   │   │             #     输出至 domain/data/ent，不入库）；列注释随 .Comment() 写进 DDL，枚举为数值编码
 │   ├── eventbus/     # 逻辑 topic 与 Send/Subscribe（§3.2）；channel/ 是唯一节点通信抽象，
 │   │   │             #   rpc/、redis/ 只是实现——任何实现都不得以 broker 持久性或 ack 提升可靠性
-│   │   ├── channel/  # Send/Subscribe + 单向、半双工、全双工能力抽象 + in-memory fake（§12.1）
-│   │   ├── rpc/      # unary Execute（半双工 request/reply）与 gRPC 双向 ResultStream（全双工）adapter
+│   │   ├── channel/  # Send/Subscribe + 单向、半双工、全双工能力抽象（§3.2）；实现子目录：
+│   │   │             #   mem/（in-memory fake，测试基座，§12.1）、rpc/（unary Execute 半双工 +
+│   │   │             #   gRPC 双向 ResultStream 全双工 adapter）、redis/（best-effort 四形态）
 │   │   └── redis/    # list/zset/stream/pubsub 的 best-effort adapter
 │   ├── cluster/      # ClusterView 外部接口 + RPC 客户端 + static 单机实现
 │   ├── config/       # 配置结构与默认值补全（含 metrics/tracing 装配参数）

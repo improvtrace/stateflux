@@ -22,13 +22,13 @@ type TaskResult struct {
 // Fields of the TaskResult.
 func (TaskResult) Fields() []ent.Field {
 	return []ent.Field{
-		field.Int64("id").StorageKey("task_id").Comment("任务 ID（雪花，非自增）；不可变结果的幂等主键").Annotations(entsql.Annotation{Incremental: &incrementDisabled}),
-		field.Int8("outcome").Comment("终态类别（数值）：1=succeeded 2=failed 3=dead（0 保留未设置）（§3.1/§5.5）"),
-		field.Int64("attempt").Comment("写入时的 attempt（fencing token），重复归集据此拒绝陈旧结果（§5.5）"),
-		field.JSON("payload", json.RawMessage{}).Comment("从 task_payloads 合并入行的任务载荷 jsonb（终态同事务，不可变）（§5.5）").Optional(),
-		field.JSON("result", json.RawMessage{}).Comment("业务结果 jsonb；不可变；大结果同 payload 规则（§3.1）").Optional(),
-		field.String("error").Comment("失败/死信的错误信息（succeeded 时为空）").Default(""),
-		field.Time("completed_at").Comment("终态写入时间（结果保留期 TTL/分区的独立依据）（§3.1）"),
+		field.Int64("id").StorageKey("task_id").Comment("task ID (snowflake, not auto-increment); idempotent primary key of the immutable result").Annotations(entsql.Annotation{Incremental: &incrementDisabled}),
+		field.Int8("outcome").Comment("terminal outcome (numeric): 1=succeeded 2=failed 3=dead (0 reserved as unset) (§3.1/§5.5)"),
+		field.Int64("attempt").Comment("attempt at write time (fencing token); stale results rejected by it on duplicate collection (§5.5)"),
+		field.JSON("payload", json.RawMessage{}).Comment("task payload jsonb merged from task_payloads (same terminal transaction, immutable) (§5.5)").Optional(),
+		field.JSON("result", json.RawMessage{}).Comment("business result jsonb; immutable; large results follow the payload rule (§3.1)").Optional(),
+		field.String("error").Comment("error message for failure/dead letter (empty when succeeded)").Default(""),
+		field.Time("completed_at").Comment("terminal write time (independent basis for result retention TTL/partitioning) (§3.1)"),
 	}
 }
 

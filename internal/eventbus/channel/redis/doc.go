@@ -1,4 +1,4 @@
-// Package redis 是 eventbus/channel 在 Redis 上的 best-effort 实现（§3.2、§12.3）：
+// Package redis 是 eventbus/channel 的实现子目录：在 Redis 上的 best-effort 实现（§3.2、§12.3）：
 // list、zset、stream、pubsub 四种形态都只是异步单向投递的通道，等价于一次不等结果的调用。
 //
 // 实现纪律（§9.2、§9.3、§13）：

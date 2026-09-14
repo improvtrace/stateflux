@@ -22,9 +22,9 @@ type TaskIdentity struct {
 // Fields of the TaskIdentity.
 func (TaskIdentity) Fields() []ent.Field {
 	return []ent.Field{
-		field.Int64("id").StorageKey("task_id").Comment("任务 ID（雪花，非自增）；幂等命中时返回给业务方的原 ID").Annotations(entsql.Annotation{Incremental: &incrementDisabled}),
-		field.String("idempotency_key").Unique().Comment("业务幂等键（全实例唯一）：账本裁决键，dedupe 与溯源的依据（§3.1/§5.1）").NotEmpty(),
-		field.Time("created_at").Comment("写入时间（不可变）；dedupe 窗口与账本清理的扫描依据（窗口长度待定，§14）").Immutable().Default(time.Now),
+		field.Int64("id").StorageKey("task_id").Comment("task ID (snowflake, not auto-increment); original ID returned to the caller on idempotent hit").Annotations(entsql.Annotation{Incremental: &incrementDisabled}),
+		field.String("idempotency_key").Unique().Comment("business idempotency key (globally unique): ledger ruling key, basis for dedupe and provenance (§3.1/§5.1)").NotEmpty(),
+		field.Time("created_at").Comment("write time (immutable); scan basis for dedupe window and ledger cleanup (window length TBD, §14)").Immutable().Default(time.Now),
 	}
 }
 

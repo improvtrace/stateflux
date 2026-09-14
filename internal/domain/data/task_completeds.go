@@ -11,12 +11,12 @@ import (
 
 // taskCompletedsRepo 是 repository.TaskCompletedsRepository 的 ent 实现（§3.1）。
 type taskCompletedsRepo struct {
-	client *ent.Client
+	data *Data
 }
 
-// NewTaskCompleteds 构造 task_completeds 仓储；事务内复用时传入 tx.Client()。
-func NewTaskCompleteds(client *ent.Client) repository.TaskCompletedsRepository {
-	return &taskCompletedsRepo{client: client}
+// NewTaskCompleteds 从 Data 构造仓储；事务内的仓储请经 d.WithTx(tx) 构造（§5.2/§5.5）。
+func NewTaskCompleteds(data *Data) repository.TaskCompletedsRepository {
+	return &taskCompletedsRepo{data: data}
 }
 
 func (r *taskCompletedsRepo) Create(ctx context.Context, tasks []*ent.TaskCompleted) error {
@@ -25,7 +25,7 @@ func (r *taskCompletedsRepo) Create(ctx context.Context, tasks []*ent.TaskComple
 	}
 	builders := make([]*ent.TaskCompletedCreate, 0, len(tasks))
 	for _, t := range tasks {
-		builders = append(builders, r.client.TaskCompleted.Create().
+		builders = append(builders, r.data.db.TaskCompleted.Create().
 			SetID(t.ID).
 			SetType(t.Type).
 			SetOperator(t.Operator).
@@ -51,16 +51,16 @@ func (r *taskCompletedsRepo) Create(ctx context.Context, tasks []*ent.TaskComple
 			SetOutcome(t.Outcome).
 			SetCompletedAt(t.CompletedAt))
 	}
-	_, err := r.client.TaskCompleted.CreateBulk(builders...).Save(ctx)
+	_, err := r.data.db.TaskCompleted.CreateBulk(builders...).Save(ctx)
 	return err
 }
 
 func (r *taskCompletedsRepo) CountByBizBatchID(ctx context.Context, bizBatchID string) (int, error) {
-	return r.client.TaskCompleted.Query().Where(taskcompleted.BizBatchID(bizBatchID)).Count(ctx)
+	return r.data.db.TaskCompleted.Query().Where(taskcompleted.BizBatchID(bizBatchID)).Count(ctx)
 }
 
 func (r *taskCompletedsRepo) ListDeadLetters(ctx context.Context, limit int) ([]*ent.TaskCompleted, error) {
-	return r.client.TaskCompleted.Query().
+	return r.data.db.TaskCompleted.Query().
 		Where(taskcompleted.OutcomeEQ(int8(schema.OutcomeDead))).
 		Order(ent.Desc(taskcompleted.FieldCompletedAt)).
 		Limit(limit).
@@ -68,5 +68,5 @@ func (r *taskCompletedsRepo) ListDeadLetters(ctx context.Context, limit int) ([]
 }
 
 func (r *taskCompletedsRepo) Get(ctx context.Context, taskID int64) (*ent.TaskCompleted, error) {
-	return r.client.TaskCompleted.Query().Where(taskcompleted.ID(taskID)).Only(ctx)
+	return r.data.db.TaskCompleted.Query().Where(taskcompleted.ID(taskID)).Only(ctx)
 }

@@ -11,12 +11,12 @@ import (
 
 // taskProcessingsRepo 是 repository.TaskProcessingsRepository 的 ent 实现（§3.1）。
 type taskProcessingsRepo struct {
-	client *ent.Client
+	data *Data
 }
 
-// NewTaskProcessings 构造 task_processings 仓储；事务内复用时传入 tx.Client()。
-func NewTaskProcessings(client *ent.Client) repository.TaskProcessingsRepository {
-	return &taskProcessingsRepo{client: client}
+// NewTaskProcessings 从 Data 构造仓储；事务内的仓储请经 d.WithTx(tx) 构造（§5.2/§5.5）。
+func NewTaskProcessings(data *Data) repository.TaskProcessingsRepository {
+	return &taskProcessingsRepo{data: data}
 }
 
 func (r *taskProcessingsRepo) Create(ctx context.Context, tasks []*ent.TaskProcessing) error {
@@ -25,7 +25,7 @@ func (r *taskProcessingsRepo) Create(ctx context.Context, tasks []*ent.TaskProce
 	}
 	builders := make([]*ent.TaskProcessingCreate, 0, len(tasks))
 	for _, t := range tasks {
-		builders = append(builders, r.client.TaskProcessing.Create().
+		builders = append(builders, r.data.db.TaskProcessing.Create().
 			SetID(t.ID).
 			SetType(t.Type).
 			SetOperator(t.Operator).
@@ -47,12 +47,12 @@ func (r *taskProcessingsRepo) Create(ctx context.Context, tasks []*ent.TaskProce
 			SetCreatedAt(t.CreatedAt).
 			SetUpdatedAt(t.UpdatedAt))
 	}
-	_, err := r.client.TaskProcessing.CreateBulk(builders...).Save(ctx)
+	_, err := r.data.db.TaskProcessing.CreateBulk(builders...).Save(ctx)
 	return err
 }
 
 func (r *taskProcessingsRepo) ListExpired(ctx context.Context, deadline time.Time, limit int) ([]*ent.TaskProcessing, error) {
-	return r.client.TaskProcessing.Query().
+	return r.data.db.TaskProcessing.Query().
 		Where(taskprocessing.UpdatedAtLTE(deadline)).
 		Order(ent.Asc(taskprocessing.FieldUpdatedAt)).
 		Limit(limit).
@@ -60,10 +60,10 @@ func (r *taskProcessingsRepo) ListExpired(ctx context.Context, deadline time.Tim
 }
 
 func (r *taskProcessingsRepo) DeleteByIDs(ctx context.Context, ids []int64) error {
-	_, err := r.client.TaskProcessing.Delete().Where(taskprocessing.IDIn(ids...)).Exec(ctx)
+	_, err := r.data.db.TaskProcessing.Delete().Where(taskprocessing.IDIn(ids...)).Exec(ctx)
 	return err
 }
 
 func (r *taskProcessingsRepo) Get(ctx context.Context, taskID int64) (*ent.TaskProcessing, error) {
-	return r.client.TaskProcessing.Query().Where(taskprocessing.ID(taskID)).Only(ctx)
+	return r.data.db.TaskProcessing.Query().Where(taskprocessing.ID(taskID)).Only(ctx)
 }

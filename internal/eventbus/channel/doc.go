@@ -13,7 +13,9 @@
 // 表示自己暴露了投递确认信号（XACK、RPC 返回成功等），它仅用于流控与诊断，**永不构成
 // 任务可靠性条件**（§3.2、§9.3）。
 //
+// 实现位于本包的子目录：mem/（in-memory fake，测试基座）、rpc/（unary Execute 与
+// gRPC 双向 ResultStream adapter）、redis/（list/zset/stream/pubsub best-effort）。
 // 每个实现必须做到（§6.3）：信封携带 task_id/attempt/correlation_id、尊重 context 取消、
 // 暴露连接与投递错误指标、允许订阅端重新连接。实现的替换不得改变状态机——丢失、重复、
-// 乱序与发送结果不确定都被允许，收敛一律由 PG 对账（R1–R5）完成。
+// 乱序与发送结果不确定都被允许，收敛一律由 PG 对账（R1–R4）完成。
 package channel

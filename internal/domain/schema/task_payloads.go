@@ -21,9 +21,9 @@ type TaskPayload struct {
 // Fields of the TaskPayload.
 func (TaskPayload) Fields() []ent.Field {
 	return []ent.Field{
-		field.Int64("id").StorageKey("task_id").Comment("任务 ID（雪花，非自增）；与阶段表同值，一一对应").Annotations(entsql.Annotation{Incremental: &incrementDisabled}),
-		field.JSON("payload", json.RawMessage{}).Comment("任务载荷 jsonb；创建后不可变；>64KB 由业务方改存对象存储引用（§3.1/§3.3）"),
-		field.Time("created_at").Comment("创建时间（不可变）").Immutable().Default(time.Now),
+		field.Int64("id").StorageKey("task_id").Comment("task ID (snowflake, not auto-increment); same value as stage tables, one-to-one").Annotations(entsql.Annotation{Incremental: &incrementDisabled}),
+		field.JSON("payload", json.RawMessage{}).Comment("task payload jsonb; immutable after creation; switch to object storage reference beyond 64KB (§3.1/§3.3)"),
+		field.Time("created_at").Comment("creation time (immutable)").Immutable().Default(time.Now),
 	}
 }
 
