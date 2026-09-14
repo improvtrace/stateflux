@@ -53,7 +53,8 @@ internal/
 
 ```bash
 make api        # 生成 api/ 下 proto 的 Go 代码（需要 protoc）
-make generate   # 生成 ent 代码
+make generate   # 生成 ent 代码（go tool entgo.io/ent/cmd/ent）
+make wire       # 生成 wire 注入代码（go tool github.com/google/wire/cmd/wire）
 make build      # 构建 cmd/stateflux
 make vet        # go vet ./...
 ```
