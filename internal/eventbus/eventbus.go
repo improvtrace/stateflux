@@ -30,6 +30,10 @@ func NodeTopic(nodeID string, kind EventKind) channel.Topic {
 // 排序决定（§5.2）。
 func TaskTopic(band string) channel.Topic { return channel.Topic("task." + band) }
 
+// ResultTopic 返回结果归集 topic：result（§5.5）。同步 RPC 响应与异步 worker 结果都
+// 适配为 ResultEvent 后发布到该 topic，由 Collector 统一订阅。
+func ResultTopic() channel.Topic { return channel.Topic("result") }
+
 // 通信面直接复用 channel 契约，不在其上再造一层类型。
 type (
 	// Envelope 是通道信封（§3.3）。

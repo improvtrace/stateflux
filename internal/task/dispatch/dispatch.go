@@ -216,13 +216,18 @@ func (d *Dispatcher) resolveTarget(req Request) (cluster.Node, error) {
 	if req.Target.ID != "" {
 		return req.Target, nil
 	}
+	return d.ResolveTarget(req.Message)
+}
+
+// ResolveTarget 按任务约束选择目标执行节点（服务层在决定「本地投递 or 节点间转发」
+// 前调用它）。无集群视图时退化为本节点（单机/测试装配）。
+func (d *Dispatcher) ResolveTarget(msg *taskv1.TaskMessage) (cluster.Node, error) {
 	if d.nodes != nil {
-		if n, ok := d.nodes.Select(req.Message.GetNode(), req.Message.GetVpc(), req.Message.GetLabel(), int(req.Message.GetHashBucket())); ok {
+		if n, ok := d.nodes.Select(msg.GetNode(), msg.GetVpc(), msg.GetLabel(), int(msg.GetHashBucket())); ok {
 			return n, nil
 		}
 		return cluster.Node{}, ErrNoTargetNode
 	}
-	// 无集群视图：退化为本节点（单机/测试装配）。
 	if d.self == "" {
 		return cluster.Node{}, ErrNoTargetNode
 	}
