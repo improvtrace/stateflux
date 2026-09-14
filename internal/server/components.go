@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"sync"
+	"time"
 
 	"google.golang.org/grpc"
 
@@ -38,8 +39,10 @@ import (
 // provideMetrics 构造 OTel 指标集。
 func provideMetrics() (*obs.Metrics, error) { return obs.New() }
 
-// provideStore 构造任务账本组合根（§3.1）。
-func provideStore(d *data.Data) repository.Store { return data.NewStore(d) }
+// provideStore 构造任务账本组合根（§3.1）：回调派生复用节点雪花，保证 ID 全局唯一（§5.6）。
+func provideStore(d *data.Data, ids *domain.Snowflake) repository.Store {
+	return data.NewStoreWithIDGenerator(d, ids.Next)
+}
 
 // provideSnowflake 构造任务 ID 生成器（§3.1：客户端雪花）。
 func provideSnowflake(cfg config.Config) *domain.Snowflake {
@@ -199,6 +202,7 @@ func provideCollectorRunner(bus *eventbus.EventBus, c *collector.Collector, metr
 func provideReconciler(cfg config.Config, store repository.Store, view cacheview.View, metrics *obs.Metrics) *reconcile.Reconciler {
 	return reconcile.New(reconcile.Options{
 		Ledger:      store,
+		Orphans:     store,
 		View:        view,
 		Interval:    cfg.Runtime.ReconcileInterval,
 		Grace:       cfg.Runtime.DispatchGrace,
@@ -225,8 +229,17 @@ func provideCycle(cfg config.Config, store repository.Store, d *dispatch.Dispatc
 	})
 }
 
+// provideTaskNotifier 建立 PG LISTEN/NOTIFY 唤醒（§5.1）：通知只是优化，建立失败不阻塞启动。
+func provideTaskNotifier(cfg config.Config) (*data.TaskNotifier, func()) {
+	n, err := data.NewTaskNotifier(cfg.PG.DSN, cfg.PG.SearchPath)
+	if err != nil {
+		return nil, func() {}
+	}
+	return n, func() { _ = n.Close() }
+}
+
 // provideSchedulerGroup 按配置构造多个调度实例（不同触发方式，§15.1#11）。
-func provideSchedulerGroup(cfg config.Config, cycle *scheduler.LedgerCycle, store *biz.CoherenceStore, metrics *obs.Metrics) *scheduler.Group {
+func provideSchedulerGroup(cfg config.Config, cycle *scheduler.LedgerCycle, store *biz.CoherenceStore, notifier *data.TaskNotifier, metrics *obs.Metrics) *scheduler.Group {
 	names := cfg.Runtime.SchedulerTriggers
 	if len(names) == 0 {
 		names = []string{"tick"}
@@ -236,7 +249,15 @@ func provideSchedulerGroup(cfg config.Config, cycle *scheduler.LedgerCycle, stor
 		var trigger scheduler.Trigger
 		switch name {
 		case "notify":
-			trigger = scheduler.NotifyTrigger{FallbackInterval: cfg.Runtime.TickInterval}
+			fallback := cfg.Runtime.TickInterval * 10
+			if fallback <= 0 {
+				fallback = time.Second
+			}
+			var wake <-chan struct{}
+			if notifier != nil {
+				wake = notifier.Notifications()
+			}
+			trigger = scheduler.NotifyTrigger{Notifications: wake, FallbackInterval: fallback}
 		case "coherence":
 			trigger = scheduler.CoherenceTrigger{Source: store, PollInterval: cfg.Coherence.SyncInterval}
 		case "manual":

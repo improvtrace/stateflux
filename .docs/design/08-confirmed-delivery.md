@@ -89,3 +89,22 @@ STATEFLUX_TEST_DSN='postgres://stateflux:stateflux@127.0.0.1:5432/stateflux?sslm
 
 端到端冒烟（本地 PG+Redis）：factory → enqueue → promote → claim → Redis 队列分发 → worker
 （codec 解码/执行）→ gRPC ResultStream → collector → `task_completeds`/`task_results`，已实测完成。
+
+## 15.5 第二轮补充落地（v4.1）
+
+- **回调派生（§5.6）**：终态事务内按 `parent:attempt:outcome` 幂等键派生 OnSuccess/OnError 任务，
+  深度沿 `task_completeds.parent_task_id` 上溯并以 `domain.MaxCallbackDepth=8` 截断；新增
+  `domain.CallbackSpec`（JSON 契约）与 `data.deriveCallback`。
+- **工厂孤儿判定（§5.6）**：`Store.BatchProgress`（完成/在途计数）与 `Store.StaleBatches`
+  （超期未终态批次）；`runtime/reconcile` 周期扫描并以 `reason=factory_orphan` 记录指标。
+- **业务接入函数（§5.1、§14.10）**：迁移 `000002` 新增 `stateflux.next_task_id()` 与
+  `stateflux.enqueue_tasks(...)`（SECURITY DEFINER、单事务、幂等账本裁决），并建立
+  `stateflux_biz` 角色（仅函数 EXECUTE + `task_results`/`task_identities` SELECT，内部表不可直写）
+  与关键次级索引。
+- **唤醒通道（§5.1）**：迁移 `000003` 在 `task_pendings` 上建 AFTER INSERT 触发器调用
+  `pg_notify('stateflux_tasks', id)`；`data.TaskNotifier` 用 lib/pq Listener 适配为 Go 唤醒信号，
+  接入 `scheduler.NotifyTrigger`（tick 兜底不可关闭）。
+- **关键修复（search_path 冲突）**：当数据库用户名与 `stateflux` schema 同名时，PostgreSQL 默认
+  `"$user", public` 会把 ent 与原生 SQL 解析到 `stateflux` schema，而 SQL 函数固定写在 `public`，
+  造成「应用与函数写两张表」。`data.WithSearchPath` 现在把连接 `search_path` 固定为
+  `config.PG.SearchPath`（默认 `public`），`make api/generate/wire` 与迁移顺序不受影响。

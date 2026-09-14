@@ -57,7 +57,8 @@ func InitializeApplication(ctx context.Context, cfg config.Config) (*App, func()
 		return nil, nil, err
 	}
 	runtime := provideWorkerRuntime(cfg, eventBus, codec, handlerRegistry, resultPublisher, metrics)
-	store := provideStore(data)
+	snowflake := provideSnowflake(cfg)
+	store := provideStore(data, snowflake)
 	collector := provideCollector(store, metrics)
 	executorServer := provideExecutorServer(runtime, collector, metrics)
 	workerRegistry, err := provideCapabilityRegistry()
@@ -78,7 +79,8 @@ func InitializeApplication(ctx context.Context, cfg config.Config) (*App, func()
 	httpServer := NewHTTPServer(cfg)
 	serverWorkerComponent := provideWorkerComponent(runtime)
 	ledgerCycle := provideCycle(cfg, store, dispatcher, eventBus, metrics)
-	group := provideSchedulerGroup(cfg, ledgerCycle, coherenceStore, metrics)
+	taskNotifier, cleanup3 := provideTaskNotifier(cfg)
+	group := provideSchedulerGroup(cfg, ledgerCycle, coherenceStore, taskNotifier, metrics)
 	serverSchedulerComponent := provideSchedulerComponent(group)
 	reconciler := provideReconciler(cfg, store, cacheviewView, metrics)
 	serverReconcileComponent := provideReconcileComponent(reconciler)
@@ -88,11 +90,11 @@ func InitializeApplication(ctx context.Context, cfg config.Config) (*App, func()
 	serverPullerComponent := providePullerComponent(coherencePuller)
 	factoryRegistry, err := provideFactoryRegistry(cfg)
 	if err != nil {
+		cleanup3()
 		cleanup2()
 		cleanup()
 		return nil, nil, err
 	}
-	snowflake := provideSnowflake(cfg)
 	enqueuer := provideEnqueuer(store, snowflake, cfg)
 	manager := provideFactoryManager(factoryRegistry, enqueuer)
 	serverFactoryComponent := provideFactoryComponent(manager)
@@ -101,11 +103,13 @@ func InitializeApplication(ctx context.Context, cfg config.Config) (*App, func()
 	v := provideComponents(serverWorkerComponent, serverSchedulerComponent, serverReconcileComponent, serverSyncerComponent, serverPullerComponent, serverFactoryComponent, serverCollectorRunnerComponent)
 	app, err := provideApp(cfg, grpcServer, httpServer, v, forwardRegistry, dispatchServer)
 	if err != nil {
+		cleanup3()
 		cleanup2()
 		cleanup()
 		return nil, nil, err
 	}
 	return app, func() {
+		cleanup3()
 		cleanup2()
 		cleanup()
 	}, nil
@@ -161,6 +165,7 @@ var ProviderSet = wire.NewSet(
 	provideCycle,
 	provideSchedulerGroup,
 	provideSchedulerComponent,
+	provideTaskNotifier,
 
 	provideExecutorServer,
 	provideCapabilityServer,

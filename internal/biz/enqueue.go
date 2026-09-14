@@ -51,6 +51,10 @@ func (e *Enqueuer) Enqueue(ctx context.Context, t task.Task) (int64, bool, error
 	if channel == "" {
 		return 0, false, errors.New("biz: task channel must not be empty")
 	}
+	// 回调规格在写入前校验：非法回调不应进入账本（§5.6）。
+	if _, err := domain.UnmarshalCallback(spec.Callback); err != nil {
+		return 0, false, fmt.Errorf("biz: invalid callback spec: %w", err)
+	}
 	taskID := e.ids.Next()
 	key := spec.IdempotencyKey
 	if key == "" {

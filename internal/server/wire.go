@@ -69,6 +69,7 @@ var ProviderSet = wire.NewSet(
 	provideCycle,
 	provideSchedulerGroup,
 	provideSchedulerComponent,
+	provideTaskNotifier,
 
 	// 服务端与组件
 	provideExecutorServer,

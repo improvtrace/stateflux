@@ -10,6 +10,7 @@ import (
 
 	entsql "entgo.io/ent/dialect/sql"
 
+	"github.com/improvtrace/stateflux/internal/domain"
 	"github.com/improvtrace/stateflux/internal/domain/data/ent"
 	"github.com/improvtrace/stateflux/internal/domain/data/ent/taskidentity"
 	"github.com/improvtrace/stateflux/internal/domain/data/ent/taskpayload"
@@ -74,6 +75,9 @@ RETURNING id, type, operator, priority, channel, timeout_ms, max_attempts, attem
 type store struct {
 	data *Data
 
+	// nextID 为终态事务内派生的回调任务生成 task_id（§5.6）；默认雪花，可注入替换。
+	nextID func() int64
+
 	pendings     repository.TaskPendingsRepository
 	schedulables repository.TaskSchedulablesRepository
 	processings  repository.TaskProcessingsRepository
@@ -86,10 +90,19 @@ type store struct {
 // store 必须完整实现组合根契约。
 var _ repository.Store = (*store)(nil)
 
-// NewStore 从 Data 构造组合根 Store（§3.1/§5.2/§5.5）。
+// NewStore 从 Data 构造组合根 Store（§3.1/§5.2/§5.5）：回调派生任务使用默认雪花生成器。
 func NewStore(data *Data) repository.Store {
+	return NewStoreWithIDGenerator(data, domain.NewSnowflake("callback").Next)
+}
+
+// NewStoreWithIDGenerator 允许注入派生任务 ID 生成器（装配期可复用节点雪花，保证全局唯一）。
+func NewStoreWithIDGenerator(data *Data, next func() int64) repository.Store {
+	if next == nil {
+		next = domain.NewSnowflake("callback").Next
+	}
 	return &store{
 		data:         data,
+		nextID:       next,
 		pendings:     NewTaskPendings(data),
 		schedulables: NewTaskSchedulables(data),
 		processings:  NewTaskProcessings(data),
@@ -358,7 +371,7 @@ func (s *store) Complete(ctx context.Context, req repository.CompleteRequest) (b
 		completedAt = time.Now()
 	}
 	err := s.data.WithTx(ctx, func(ctx context.Context) error {
-		return terminalMove(ctx, s.txClient(ctx), req.TaskID, req.Attempt, req.Outcome, req.Result, req.Error, completedAt, true)
+		return terminalMove(ctx, s.txClient(ctx), s.nextID, req.TaskID, req.Attempt, req.Outcome, req.Result, req.Error, completedAt, true)
 	})
 	return terminalOutcome(err)
 }
@@ -367,7 +380,7 @@ func (s *store) Complete(ctx context.Context, req repository.CompleteRequest) (b
 // （completed + task_results、删 payload、删 processing）。行不存在或墓碑已存在返回 false。
 func (s *store) DeadLetter(ctx context.Context, taskID int64) (bool, error) {
 	err := s.data.WithTx(ctx, func(ctx context.Context) error {
-		return terminalMove(ctx, s.txClient(ctx), taskID, 0, schema.OutcomeDead, nil, "", time.Now(), false)
+		return terminalMove(ctx, s.txClient(ctx), s.nextID, taskID, 0, schema.OutcomeDead, nil, "", time.Now(), false)
 	})
 	return terminalOutcome(err)
 }
@@ -386,7 +399,7 @@ func terminalOutcome(err error) (bool, error) {
 
 // terminalMove 在调用方事务内完成一次终态搬移（§5.5）：读 processing（可选 attempt fence），
 // 合并 payload 入 task_results，写 completed 与 results 墓碑，删除分离的 payload 与 processing。
-func terminalMove(ctx context.Context, c *ent.Client, taskID, attempt int64, outcome schema.Outcome, result json.RawMessage, errMsg string, completedAt time.Time, checkAttempt bool) error {
+func terminalMove(ctx context.Context, c *ent.Client, nextID func() int64, taskID, attempt int64, outcome schema.Outcome, result json.RawMessage, errMsg string, completedAt time.Time, checkAttempt bool) error {
 	proc, err := c.TaskProcessing.Query().Where(taskprocessing.ID(taskID)).Only(ctx)
 	if err != nil {
 		if ent.IsNotFound(err) {
@@ -466,7 +479,8 @@ func terminalMove(ctx context.Context, c *ent.Client, taskID, attempt int64, out
 	if _, err := c.TaskProcessing.Delete().Where(taskprocessing.ID(taskID)).Exec(ctx); err != nil {
 		return err
 	}
-	return nil
+	// 终态事务内派生回调（§5.6）：同事务写入保证「终态与派生」原子可见。
+	return deriveCallback(ctx, c, nextID, proc, outcome, completedAt)
 }
 
 // ResetExpired 是 R1 对账（§6.2）：updated_at 早于 deadline 的 processing 行移回 schedulable

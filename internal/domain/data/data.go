@@ -51,7 +51,9 @@ func (d *Data) Redis() redis.UniversalClient { return d.redis }
 // 驱动连接池与使用期错误暴露。
 func Open(ctx context.Context, cfg config.Config) (*Data, func(), error) {
 	// lib/pq 注册的 driver 名为 "postgres"；连接池参数经 Driver.DB() 设置。
-	drv, err := entsql.Open(dialect.Postgres, cfg.PG.DSN)
+	// 固定 search_path，避免用户名与 schema 同名时的隐式解析（§3.1）。
+	dsn := WithSearchPath(cfg.PG.DSN, defaultSearchPath(cfg.PG.SearchPath))
+	drv, err := entsql.Open(dialect.Postgres, dsn)
 	if err != nil {
 		return nil, nil, fmt.Errorf("data: open pg: %w", err)
 	}

@@ -32,6 +32,9 @@ type PG struct {
 	ConnMaxLifetime time.Duration
 	// ConnMaxIdleTime 空闲连接最长保留时间。
 	ConnMaxIdleTime time.Duration
+	// SearchPath 是连接建立后固定的 search_path（默认 public）：避免「用户名与 schema 同名」
+	// 时 PostgreSQL 的 "$user" 隐式 schema 把表解析到错误位置（§3.1）。
+	SearchPath string
 }
 
 // Redis 是 Redis 连接配置（§3.2：仅作为 best-effort 通信实现，正确性不依赖 Redis）。
@@ -196,6 +199,7 @@ func Default() Config {
 			MaxIdleConns:    10,
 			ConnMaxLifetime: 30 * time.Minute,
 			ConnMaxIdleTime: 5 * time.Minute,
+			SearchPath:      "public",
 		},
 		Redis: Redis{
 			Addrs:        []string{"127.0.0.1:6379"},
@@ -267,6 +271,7 @@ func FromEnv() Config {
 	envInt(func(key string, val int) { cfg.PG.MaxIdleConns = val }, "STATEFLUX_PG_MAX_IDLE_CONNS")
 	envDuration(func(key string, val time.Duration) { cfg.PG.ConnMaxLifetime = val }, "STATEFLUX_PG_CONN_MAX_LIFETIME")
 	envDuration(func(key string, val time.Duration) { cfg.PG.ConnMaxIdleTime = val }, "STATEFLUX_PG_CONN_MAX_IDLE_TIME")
+	envString(func(key, val string) { cfg.PG.SearchPath = val }, "STATEFLUX_PG_SEARCH_PATH")
 
 	envStrings(func(key string, val []string) { cfg.Redis.Addrs = val }, "STATEFLUX_REDIS_ADDRS")
 	envString(func(key, val string) { cfg.Redis.Password = val }, "STATEFLUX_REDIS_PASSWORD")

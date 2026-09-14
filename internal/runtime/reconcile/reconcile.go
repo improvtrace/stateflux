@@ -26,6 +26,11 @@ type View interface {
 	Purge(ctx context.Context, prefix string) (int64, error)
 }
 
+// OrphanScanner 是工厂孤儿判定面（§5.6）：返回超期仍未终态的在途批次 ID。
+type OrphanScanner interface {
+	StaleBatches(ctx context.Context, before time.Time, limit int) ([]string, error)
+}
+
 // Options 是 Reconciler 装配参数。
 type Options struct {
 	Ledger Ledger
@@ -41,20 +46,26 @@ type Options struct {
 	// PurgePrefix 非空时启用 R2 清理；PurgeEvery 控制清理频率（以轮计）。
 	PurgePrefix string
 	PurgeEvery  int
-	Metrics     *obs.Metrics
+	// Orphans 非空时启用工厂孤儿扫描（§5.6）。
+	Orphans OrphanScanner
+	// OrphanAge 是在途批次被判为孤儿的年龄阈值；<=0 用 2*(Grace+Skew)。
+	OrphanAge time.Duration
+	Metrics   *obs.Metrics
 }
 
 // Reconciler 周期性执行 R1（并可选 R2）。
 type Reconciler struct {
-	ledger   Ledger
-	view     View
-	interval time.Duration
-	grace    time.Duration
-	skew     time.Duration
-	limit    int
-	prefix   string
-	every    int
-	metrics  *obs.Metrics
+	ledger    Ledger
+	view      View
+	interval  time.Duration
+	grace     time.Duration
+	skew      time.Duration
+	limit     int
+	prefix    string
+	every     int
+	orphans   OrphanScanner
+	orphanAge time.Duration
+	metrics   *obs.Metrics
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
@@ -84,16 +95,22 @@ func New(opts Options) *Reconciler {
 	if every <= 0 {
 		every = 30
 	}
+	orphanAge := opts.OrphanAge
+	if orphanAge <= 0 {
+		orphanAge = 2 * (grace + skew)
+	}
 	return &Reconciler{
-		ledger:   opts.Ledger,
-		view:     opts.View,
-		interval: interval,
-		grace:    grace,
-		skew:     skew,
-		limit:    limit,
-		prefix:   opts.PurgePrefix,
-		every:    every,
-		metrics:  opts.Metrics,
+		ledger:    opts.Ledger,
+		view:      opts.View,
+		interval:  interval,
+		grace:     grace,
+		skew:      skew,
+		limit:     limit,
+		prefix:    opts.PurgePrefix,
+		every:     every,
+		orphans:   opts.Orphans,
+		orphanAge: orphanAge,
+		metrics:   opts.Metrics,
 	}
 }
 
@@ -162,5 +179,24 @@ func (r *Reconciler) RunOnce(ctx context.Context) (int, error) {
 		// R2：只清理视图，不据此修改 PG（§6.2）。
 		_, _ = r.view.Purge(ctx, r.prefix)
 	}
+	r.scanOrphans(ctx)
 	return reset, nil
+}
+
+// scanOrphans 统计超期未终态的工厂批次并记录指标（§5.6）。孤儿只做告警，不自动改写任务：
+// 在途任务已由 R1 重置重投，孤儿判定用于暴露「工厂批次卡住」这一类问题。
+func (r *Reconciler) scanOrphans(ctx context.Context) {
+	if r.orphans == nil {
+		return
+	}
+	ids, err := r.orphans.StaleBatches(ctx, time.Now().Add(-r.orphanAge), r.limit)
+	if err != nil {
+		if r.metrics != nil {
+			r.metrics.ResetCount(ctx, "orphan_error", 1)
+		}
+		return
+	}
+	if len(ids) > 0 && r.metrics != nil {
+		r.metrics.ResetCount(ctx, "factory_orphan", int64(len(ids)))
+	}
 }

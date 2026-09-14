@@ -67,6 +67,18 @@ type Store interface {
 	CountSchedulable(ctx context.Context) (int, error)
 	// CountProcessing 返回 processing 在途行数。
 	CountProcessing(ctx context.Context) (int, error)
+	// BatchProgress 统计某工厂批次的终态与在途数量（工厂孤儿判定，§5.6）。
+	BatchProgress(ctx context.Context, bizBatchID string) (BatchProgress, error)
+	// StaleBatches 返回创建早于 before 且仍未终态的在途批次 ID（§5.6）。
+	StaleBatches(ctx context.Context, before time.Time, limit int) ([]string, error)
+}
+
+// BatchProgress 是工厂批次的完成/在途统计（§5.6）。
+type BatchProgress struct {
+	// Completed 是已终态数量。
+	Completed int
+	// InFlight 是 pending + schedulable + processing 之和。
+	InFlight int
 }
 
 // Processing 是在途任务行的只读投影（§3.1/§5.2）：只携带调度、分发与观测所需字段，避免把

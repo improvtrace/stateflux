@@ -17,8 +17,11 @@ case "${1:-}" in
     docker compose -f build/docker-compose.yml down -v
     ;;
   migrate)
-    docker exec -i build-postgres-1 psql -U stateflux -d stateflux \
-      < internal/domain/migration/000001_20260914_create_task_tables.sql
+    # 按版本号顺序应用全部迁移（000001 建表 -> 000002 函数/索引/角色 -> 000003 唤醒触发器）
+    for f in $(ls internal/domain/migration/*.sql | sort); do
+      echo "applying $f"
+      docker exec -i build-postgres-1 psql -U stateflux -d stateflux < "$f"
+    done
     ;;
   run)
     go build -o stateflux ./cmd/stateflux
