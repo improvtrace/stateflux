@@ -1,0 +1,69 @@
+// dispatch.proto —— 任务分发对外契约（proto3，§15.1#5）。
+//
+// 定位：向外提供任务分发接口。Dispatch 支持三种投递语义（at_least_once / at_most_once /
+// exactly_once）、两种投递形态（异步 redis queue / 同步 rpc），并支持节点间转发。
+// 路由决策全部在调度侧：调用方可以只给出逻辑队列与语义，由节点解析目标执行节点
+// （§1.2.7）。exactly_once 是「入口尽力去重」的投递语义，不是端到端正确性承诺——
+// 通道丢失仍由 PG 对账收敛（§13、§15.3#2）。
+syntax = "proto3";
+
+package dispatch.v1;
+
+import "api/stateflux/task/v1/task.proto";
+
+option go_package = "github.com/improvtrace/stateflux/api/dispatch/v1;dispatchv1";
+
+// Semantics 是投递语义。
+enum Semantics {
+  // AT_LEAST_ONCE 至少一次：允许重复，失败按 max_attempts 重试（默认）。
+  AT_LEAST_ONCE = 0;
+  // AT_MOST_ONCE 至多一次：失败不重试，允许丢失。
+  AT_MOST_ONCE = 1;
+  // EXACTLY_ONCE 尽力恰一次：入口按幂等键去重，通道丢失仍由 R1 对账兜底。
+  EXACTLY_ONCE = 2;
+}
+
+// Delivery 是投递形态。
+enum Delivery {
+  // DELIVERY_ASYNC_REDIS 异步 redis queue 投递（单向，不等结果）。
+  DELIVERY_ASYNC_REDIS = 0;
+  // DELIVERY_SYNC_RPC 同步 rpc 投递（半双工，等待 ResultEvent）。
+  DELIVERY_SYNC_RPC = 1;
+}
+
+message DispatchRequest {
+  // queue 是逻辑队列/channel 名；异步为 redis 队列名，同步为 rpc channel 名。
+  string queue = 1;
+  // task 是待分发任务信封。
+  stateflux.task.v1.TaskMessage task = 2;
+  // semantics 是投递语义；未设置时用服务默认值。
+  Semantics semantics = 3;
+  // delivery 是投递形态；未设置时用服务默认值。
+  Delivery delivery = 4;
+  // target_node_id 是显式目标节点；空则由调度侧按 vpc/label 选择（§5.3）。
+  string target_node_id = 5;
+  // allow_forward 允许目标节点经节点间转发处理该请求（§15.1#6）。
+  bool allow_forward = 6;
+  // visited_nodes 是转发路径（环路保护）。
+  repeated string visited_nodes = 7;
+  // dedupe_key 是 exactly_once 的入口去重键；空则用 task.idempotency_key 或 task_id。
+  string dedupe_key = 8;
+}
+
+message DispatchResponse {
+  int64 task_id = 1;
+  // target_node_id 是最终承接该任务的节点。
+  string target_node_id = 2;
+  // accepted 仅表示已受理/已尝试投递，不表示任务已执行（best-effort，§5.3）。
+  bool accepted = 3;
+  // forwarded_by 非空表示结果来自一次转发（§15.1#6）。
+  string forwarded_by = 4;
+  // duplicate 为 true 表示 exactly_once 入口去重命中，未重复投递。
+  bool duplicate = 5;
+  // message 承载拒绝原因或诊断信息。
+  string message = 6;
+}
+
+service DispatchService {
+  rpc Dispatch(DispatchRequest) returns (DispatchResponse);
+}

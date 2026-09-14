@@ -81,6 +81,9 @@ type Envelope struct {
 	Attempt int64
 	// CorrelationID 配对请求与应答；异步实现用它做端到端诊断（§6.3）。
 	CorrelationID string
+	// Target 是目标节点 ID（§5.3、§15.1#5）：非空时由实现按节点寻址（如 unary RPC 直连
+	// 执行节点、转发经目标节点中转）。空表示 topic 广播/队列语义，由实现自行决定。
+	Target string
 	// Headers 承载 trace 传播等非业务元数据。
 	Headers map[string]string
 	Payload []byte

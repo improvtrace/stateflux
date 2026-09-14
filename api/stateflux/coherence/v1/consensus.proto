@@ -1,10 +1,67 @@
-// consensus.proto —— 节点间共识信息管理契约（proto3）。
+// consensus.proto —— 节点间共识信息管理契约（proto3，§15.1#4）。
 //
-// 定位：管理跨节点的共识/协调信息——节点成员视图、调度节点位置、控制面互斥等
-// 一致性信息在节点间的同步与裁决。生成码仅模块内 import。
-// 消息与服务定义按设计文档在实施阶段落定，当前仅占位包名与路径。
+// 定位：同步跨节点的共识/协调信息。典型内容是「异步 redis 消息队列 ↔ 执行节点」的映射
+// 关系——由**调度节点**计算分配，经 RPC 通知执行节点；执行节点只读应用，不自行分配
+// （§1.2.7 调度侧集权）。映射丢失不改变任务正确性：任务最终由 PG 对账收敛（§6.2）。
 syntax = "proto3";
 
 package stateflux.coherence.v1;
 
 option go_package = "github.com/improvtrace/stateflux/api/stateflux/coherence/v1;coherencev1";
+
+// QueueRoute 是一条「异步队列 → 执行节点」的分配记录。
+message QueueRoute {
+  // queue 是逻辑队列名（异步 redis 队列/channel 名）。
+  string queue = 1;
+  // node_id 是被分配的执行节点 ID。
+  string node_id = 2;
+  // vpc / label 是分配时依据的目标节点属性（审计与诊断用，§3.1）。
+  string vpc = 3;
+  string label = 4;
+  // hash_bucket 是分桶（0 = 不限）；同一队列可按桶拆分到多个节点。
+  int32 hash_bucket = 5;
+  // lease_unix_ms 是分配租约到期时间；0 表示长期有效。
+  int64 lease_unix_ms = 6;
+}
+
+// CoherenceState 是某一 revision 的完整共识快照。
+message CoherenceState {
+  int64 revision = 1;
+  string scheduler_node_id = 2;
+  repeated QueueRoute routes = 3;
+  // updated_unix_ms 是快照生成时间。
+  int64 updated_unix_ms = 4;
+}
+
+message GetCoherenceRequest {
+  // node_id 是请求方节点 ID：响应只包含与它相关的路由（空 = 返回全量）。
+  string node_id = 1;
+  // since_revision 是请求方已持有的 revision；服务端可据此只回增量或告知无变化。
+  int64 since_revision = 2;
+}
+
+message GetCoherenceResponse {
+  CoherenceState state = 1;
+  // not_modified 为 true 时 state 为空，表示 since_revision 已是最新。
+  bool not_modified = 2;
+}
+
+message NotifyRequest {
+  // state 是调度节点计算出的新快照。
+  CoherenceState state = 1;
+  // target_node_id 是接收通知的执行节点 ID。
+  string target_node_id = 2;
+}
+
+message NotifyResponse {
+  bool accepted = 1;
+  int64 applied_revision = 2;
+}
+
+// CoherenceService 由调度侧（server）与执行侧（client）共同使用：
+//   - 调度节点周期调用 Notify 推送快照；
+//   - 执行节点启动/重连时调用 GetCoherence 拉取快照。
+service CoherenceService {
+  rpc GetCoherence(GetCoherenceRequest) returns (GetCoherenceResponse);
+  rpc Notify(NotifyRequest) returns (NotifyResponse);
+}

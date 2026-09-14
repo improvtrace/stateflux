@@ -1,11 +1,92 @@
-// service.proto —— 节点业务执行能力契约（proto3）。
+// service.proto —— 节点业务执行能力契约（proto3，§15.1#7/#8）。
 //
-// 定位：每个节点向外提供用户自定义的业务执行能力（无状态，§1.2.8/§5.4）——
-// 执行侧不持有权威状态、可随时增减，崩溃无损失。业务实现由 biz 承载，本契约
-// 只描述执行接入面。生成码仅模块内 import。
-// 消息与服务定义按设计文档在实施阶段落定，当前仅占位包名与路径。
+// 定位：每个执行节点向外提供用户自定义的业务执行能力（无状态，§1.2.8/§5.4）——
+// 执行侧不持有权威状态、可随时增减，崩溃无损失。能力的具体实现在 internal/biz；
+// internal/worker 只负责组织、注册与管理能力集合，不实现本契约的 RPC（§15.1#8）。
+// 生成码仅模块内 import。
 syntax = "proto3";
 
 package stateflux.worker.v1;
 
 option go_package = "github.com/improvtrace/stateflux/api/stateflux/worker/v1;workerv1";
+
+// CapabilityDescriptor 描述一个已注册能力，供调度侧与诊断面发现。
+message CapabilityDescriptor {
+  // name 是能力唯一名（如 host.verify_password、file.upload）。
+  string name = 1;
+  // description 是能力说明。
+  string description = 2;
+  // labels 是能力标签（节点 label 匹配的补充维度）。
+  repeated string labels = 3;
+  // async 表示实现是否天然异步/长耗时（调度提示，不改变投递语义）。
+  bool async = 4;
+}
+
+message ListCapabilitiesRequest {}
+
+message ListCapabilitiesResponse {
+  repeated CapabilityDescriptor capabilities = 1;
+}
+
+// InvokeRequest 是通用能力调用信封：name 决定路由到哪个已注册能力。
+message InvokeRequest {
+  string name = 1;
+  // payload 是能力私有的序列化请求体（通常为 protobuf 二进制）。
+  bytes payload = 2;
+  // metadata 是调用上下文（trace、tenant 占位、超时提示等）。
+  map<string, string> metadata = 3;
+}
+
+message InvokeResponse {
+  bytes payload = 1;
+  // error 非空表示能力执行失败。
+  string error = 2;
+}
+
+message VerifyPasswordRequest {
+  string host = 1;
+  int32 port = 2;
+  string protocol = 3;
+  string username = 4;
+  string password = 5;
+  int32 timeout_ms = 6;
+}
+
+message VerifyPasswordResponse {
+  bool ok = 1;
+  string message = 2;
+}
+
+message UploadFileRequest {
+  // meta 只在流的第一个消息中出现。
+  UploadFileMeta meta = 1;
+  // content 是文件分块（流式）。
+  bytes content = 2;
+  // offset 是当前分块在文件中的偏移。
+  int64 offset = 3;
+}
+
+message UploadFileMeta {
+  string host = 1;
+  string remote_path = 2;
+  int64 total_size = 3;
+  int32 mode = 4;
+  string checksum_sha256 = 5;
+}
+
+message UploadFileResponse {
+  bool ok = 1;
+  int64 written = 2;
+  string message = 3;
+}
+
+// CapabilityService 是执行节点能力接入面（§15.1#7）：
+//   - ListCapabilities 发现本节点能力；
+//   - Invoke 通用能力调用（按 name 路由）；
+//   - VerifyPassword / UploadFile 是内置示例能力（主机验密、文件上传）。
+service CapabilityService {
+  rpc ListCapabilities(ListCapabilitiesRequest) returns (ListCapabilitiesResponse);
+  rpc Invoke(InvokeRequest) returns (InvokeResponse);
+  rpc VerifyPassword(VerifyPasswordRequest) returns (VerifyPasswordResponse);
+  rpc UploadFile(stream UploadFileRequest) returns (UploadFileResponse);
+}

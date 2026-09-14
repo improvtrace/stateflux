@@ -26,6 +26,7 @@
 | [05-layout.md](./05-layout.md) | §8 | 模块划分：目录树、依赖方向、可见性规则、布局迁移 |
 | [06-decisions.md](./06-decisions.md) | §9–§11 | 关键设计决策、默认参数与压测目标、分布式扩展路径 |
 | [07-implementation.md](./07-implementation.md) | §12–§14 | 实施顺序、边界（不做的事）、已确认决策与遗留项 |
+| [08-confirmed-delivery.md](./08-confirmed-delivery.md) | §15 | v4 落地补充确认（13 条）：wire 注入、api 契约落点、cluster/coherence/dispatch/forward/worker/cacheview/task 归属 |
 | [changelog.md](./changelog.md) | — | 版本历史（v3.4 → v3.19） |
 
 阅读顺序：01 → 02 → 03 为主线；04/05 面向实现；06/07 面向评审与排期。

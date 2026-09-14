@@ -1,8 +1,8 @@
 // cluster.proto —— 外置 cluster 访问契约（proto3）。
 //
 // 该服务由外部选举/成员系统实现，stateflux 只消费（「集群信息只读不治」）：
-// 进程通过周期性 RPC 获取当前集群节点信息（成员、角色、能力标签）与当前调度节点位置，
-// 据此决定本实例启用哪些角色。stateflux 不实现选举。
+// 进程通过周期性 RPC 获取当前集群节点信息（节点 ID、VPC、标签、角色、能力）与当前调度
+// 节点位置，据此决定本实例启用哪些角色（§2.1、§15.1#3）。stateflux 不实现选举。
 syntax = "proto3";
 
 package cluster.v1;
@@ -14,12 +14,16 @@ message ClusterInfoRequest {}
 message NodeInfo {
   // 节点唯一 ID（集群内稳定）。
   string node_id = 1;
-  // gRPC 服务地址（host:port），供 Execute / ResultStream 调用。
+  // gRPC 服务地址（host:port），供 Execute / ResultStream / Dispatch / Forward 调用。
   string address = 2;
+  // 节点所属网络域（VPC 名）：调度目标节点属性，空 = 不限制（§3.1/§15.1#3）。
+  string vpc = 3;
+  // 节点匹配标签：调度目标节点属性，自由文本、框架不解释语义（§3.1/§15.1#3）。
+  string label = 4;
   // 本节点承担的角色：biz / executor(worker) / scheduler / collector 等。
-  repeated string roles = 3;
+  repeated string roles = 5;
   // 能力标签：同步任务选节点时做 capabilities 匹配。
-  repeated string capabilities = 4;
+  repeated string capabilities = 6;
 }
 
 message ClusterInfoResponse {

@@ -1,0 +1,41 @@
+// forward.proto —— 节点间 RPC 转发契约（proto3，§15.1#6）。
+//
+// 定位：执行节点间/调度↔执行之间的通用 RPC 转发。调用方把一个「目标方法 + 序列化请求」
+// 交给 ForwardService，由接收节点在本机解出并投递给本地 handler；转发器只做中转，
+// 不产生新的调度决策（§15.3#4）。visited_nodes + ttl 提供环路保护与生命周期约束。
+syntax = "proto3";
+
+package stateflux.forward.v1;
+
+option go_package = "github.com/improvtrace/stateflux/api/stateflux/forward/v1;forwardv1";
+
+message ForwardRequest {
+  // method 是目标方法全名，如 /stateflux.dispatch.v1.DispatchService/Dispatch。
+  string method = 1;
+  // target_node_id 是目标节点；空表示由接收节点按 method 本地处理。
+  string target_node_id = 2;
+  // payload 是目标方法的序列化请求体（protobuf 二进制）。
+  bytes payload = 3;
+  // headers 承载 trace 传播与路由提示等非业务元数据。
+  map<string, string> headers = 4;
+  // visited_nodes 是转发路径（含发起节点），用于环路保护。
+  repeated string visited_nodes = 5;
+  // ttl 是剩余允许转发跳数；<=0 时接收节点必须本地处理或拒绝。
+  int32 ttl = 6;
+  // correlation_id 端到端配对请求与应答（§6.3）。
+  string correlation_id = 7;
+}
+
+message ForwardResponse {
+  // payload 是目标方法的序列化响应体。
+  bytes payload = 1;
+  map<string, string> headers = 2;
+  // served_by 是实际处理该请求的节点 ID。
+  string served_by = 3;
+  // error 非空表示目标方法返回错误（payload 可能为空）。
+  string error = 4;
+}
+
+service ForwardService {
+  rpc Forward(ForwardRequest) returns (ForwardResponse);
+}

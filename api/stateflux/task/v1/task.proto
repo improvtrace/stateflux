@@ -1,12 +1,127 @@
-// task.proto —— 调度↔执行契约（proto3）。
+// task.proto —— 调度↔执行契约（proto3，§3.3、§7）。
 //
 // 定位：ExecutorService（Execute 同步执行 + 双向 ResultStream 结果归集）与统一
 // TaskMessage / ResultEvent 信封。生成码仅模块内 import：调度侧经 task/dispatch 与
 // eventbus/channel 调用（两者都是 channel 实现，不改变状态机），执行侧 worker 提供
-// server，业务实现由 biz 承载。
-// 消息与服务定义按设计文档在实施阶段落定，当前仅占位包名与路径。
+// server，业务实现由 biz 承载（§15.1#2）。
 syntax = "proto3";
 
 package stateflux.task.v1;
 
 option go_package = "github.com/improvtrace/stateflux/api/stateflux/task/v1;taskv1";
+
+// CallbackSpec 是终态回调规格（§5.6）：按 parent:attempt:outcome 幂等派生。
+message CallbackSpec {
+  // on_success / on_error 的派生任务规格；空表示不派生。
+  TaskSpec on_success = 1;
+  TaskSpec on_error = 2;
+}
+
+// TaskSpec 是任务创建规格（业务侧 enqueue 与回调派生共用外形）。
+message TaskSpec {
+  string type = 1;
+  string operator = 2;
+  int32 priority = 3;
+  string channel = 4;
+  string vpc = 5;
+  string node = 6;
+  string label = 7;
+  int32 hash_bucket = 8;
+  int64 timeout_ms = 9;
+  int32 max_attempts = 10;
+  string idempotency_key = 11;
+  bytes payload = 12;
+  CallbackSpec callback = 13;
+  int64 parent_task_id = 14;
+  repeated string biz_race_labels = 15;
+  string biz_race_entry = 16;
+  string biz_group = 17;
+  string biz_batch_id = 18;
+}
+
+// TaskMessage 是不可变任务信封（§3.3）：调度侧在 claim 后生成，执行侧据此执行。
+// attempt 只在 claim 时递增，是唯一的执行 fence（§3.1）。
+message TaskMessage {
+  int64 task_id = 1;
+  int64 attempt = 2;
+  string type = 3;
+  string operator = 4;
+  bytes payload = 5;
+  int32 priority = 6;
+  // deadline_unix_ms 是本次执行的绝对截止时间；0 表示由 timeout_ms 推导。
+  int64 deadline_unix_ms = 7;
+  int64 timeout_ms = 8;
+  map<string, string> trace_headers = 9;
+  string channel = 10;
+  string vpc = 11;
+  string node = 12;
+  string label = 13;
+  int32 hash_bucket = 14;
+  string idempotency_key = 15;
+  // origin_node 是首次分发节点，供节点间转发与诊断使用（§15.1#5/#6）。
+  string origin_node = 16;
+  // visited_nodes 是转发路径（环路保护，§15.1#6）。
+  repeated string visited_nodes = 17;
+  // deadline 之后的字段为分发上下文；执行侧不得据此改变正确性行为（§1.2.7）。
+  int64 created_unix_ms = 18;
+}
+
+// Outcome 是终态类别（与 internal/domain/schema.Outcome 数值一致，§3.1）。
+enum Outcome {
+  OUTCOME_UNSET = 0;
+  OUTCOME_SUCCEEDED = 1;
+  OUTCOME_FAILED = 2;
+  OUTCOME_DEAD = 3;
+}
+
+// ResultEvent 是统一结果信封（§3.3）：同步 RPC 响应与异步 worker 发布都适配为它，
+// 经由同一 Collector 入口终态化（§5.5）。
+message ResultEvent {
+  int64 task_id = 1;
+  int64 attempt = 2;
+  Outcome outcome = 3;
+  bytes result = 4;
+  string error = 5;
+  // source 是结果来源节点 ID。
+  string source = 6;
+  map<string, string> trace_headers = 7;
+  int64 finished_unix_ms = 8;
+  string operator = 9;
+  string type = 10;
+}
+
+// ResultAck 是 ResultStream 的确认：只表示已收到并尝试归集，不代表已终态（best-effort）。
+// task_id/attempt 用于发送端配对未确认结果（WAL 重发，§5.4）。
+message ResultAck {
+  bool accepted = 1;
+  string message = 2;
+  int64 task_id = 3;
+  int64 attempt = 4;
+}
+
+message ExecuteRequest {
+  TaskMessage task = 1;
+}
+
+message ExecuteResponse {
+  ResultEvent result = 1;
+}
+
+message CollectRequest {
+  repeated ResultEvent results = 1;
+}
+
+message CollectResponse {
+  int32 accepted = 1;
+  int32 rejected = 2;
+}
+
+// ExecutorService 是执行节点的接入面（§7）：
+//   - Execute：半双工 request/reply，调度侧同步等结果；
+//   - ResultStream：全双工，worker 发布 ResultEvent、调度侧回 ResultAck；
+//   - Collect：同步批量结果上报（适配器路径）。
+service ExecutorService {
+  rpc Execute(ExecuteRequest) returns (ExecuteResponse);
+  rpc ResultStream(stream ResultEvent) returns (stream ResultAck);
+  rpc Collect(CollectRequest) returns (CollectResponse);
+}
