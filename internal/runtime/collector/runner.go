@@ -12,7 +12,7 @@ import (
 
 // Runner 把 Collector 接到某个 EventBus channel 的 result topic 上（§5.5）：
 // 异步 Redis 结果通道或全双工 stream 的订阅侧都经它归集。默认部署下 worker 走
-// gRPC ResultStream，由 biz.ExecutorServer.ResultStream 直接调用同一 Collector，
+// gRPC ResultStream，由 biztask.ExecutorServer.ResultStream 直接调用同一 Collector，
 // 因此 Runner 主要服务于可替换的 Redis 结果通道。
 type Runner struct {
 	bus         *eventbus.EventBus

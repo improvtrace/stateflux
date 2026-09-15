@@ -1,4 +1,6 @@
-package biz
+// Package coherence 实现 api/stateflux/coherence/v1 的服务端业务（§15.1#4）：共识快照的
+// 进程内持有、分配计算与调度↔执行节点同步。
+package coherence
 
 import (
 	"context"

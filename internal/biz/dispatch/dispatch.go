@@ -1,4 +1,5 @@
-package biz
+// Package dispatch 实现 api/dispatch/v1 的服务端业务（§15.1#5）：对外分发入口与节点间转发。
+package dispatch
 
 import (
 	"context"
@@ -8,11 +9,12 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	dispatchv1 "github.com/improvtrace/stateflux/api/dispatch/v1"
+	bizcoherence "github.com/improvtrace/stateflux/internal/biz/coherence"
 	"github.com/improvtrace/stateflux/internal/cluster"
 	"github.com/improvtrace/stateflux/internal/config"
 	"github.com/improvtrace/stateflux/internal/forward"
 	"github.com/improvtrace/stateflux/internal/obs"
-	"github.com/improvtrace/stateflux/internal/task/dispatch"
+	taskdispatch "github.com/improvtrace/stateflux/internal/task/dispatch"
 )
 
 // DispatchMethod 是 DispatchService.Dispatch 的 RPC 方法全名（转发注册键，§15.1#6）。
@@ -24,7 +26,7 @@ const DispatchMethod = "/dispatch.v1.DispatchService/Dispatch"
 type DispatchServer struct {
 	dispatchv1.UnimplementedDispatchServiceServer
 
-	dispatcher *dispatch.Dispatcher
+	dispatcher *taskdispatch.Dispatcher
 	nodes      *cluster.Cache
 	forwarder  *forward.Forwarder
 	self       string
@@ -34,7 +36,7 @@ type DispatchServer struct {
 
 // DispatchServerOptions 是装配参数。
 type DispatchServerOptions struct {
-	Dispatcher *dispatch.Dispatcher
+	Dispatcher *taskdispatch.Dispatcher
 	Nodes      *cluster.Cache
 	Forwarder  *forward.Forwarder
 	Self       string
@@ -113,7 +115,7 @@ func (s *DispatchServer) deliverLocal(ctx context.Context, req *dispatchv1.Dispa
 			node = n
 		}
 	}
-	res, err := s.dispatcher.Deliver(ctx, dispatch.Request{
+	res, err := s.dispatcher.Deliver(ctx, taskdispatch.Request{
 		Queue:         req.GetQueue(),
 		Message:       req.GetTask(),
 		Delivery:      deliveryOf(req.GetDelivery()),
@@ -166,7 +168,7 @@ func (s *DispatchServer) HandleForwarded(ctx context.Context, payload []byte, he
 }
 
 // LocalQueueFor 返回共识视图给出的队列归属（供执行节点决定订阅哪些队列）。
-func (s *DispatchServer) LocalQueueFor(state *CoherenceStore, queue string) (string, bool) {
+func (s *DispatchServer) LocalQueueFor(state *bizcoherence.CoherenceStore, queue string) (string, bool) {
 	if state == nil {
 		return "", false
 	}

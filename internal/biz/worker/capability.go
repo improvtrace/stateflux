@@ -1,4 +1,6 @@
-package biz
+// Package worker 实现 api/stateflux/worker/v1 的服务端业务（§15.1#7/#8）：执行节点能力注册与
+// RPC（CapabilityService）、内置验密/上传能力实现，以及队列分配视图适配。
+package worker
 
 import (
 	"context"
@@ -11,7 +13,7 @@ import (
 
 	workerv1 "github.com/improvtrace/stateflux/api/stateflux/worker/v1"
 	"github.com/improvtrace/stateflux/internal/obs"
-	"github.com/improvtrace/stateflux/internal/worker"
+	workerrt "github.com/improvtrace/stateflux/internal/worker"
 )
 
 // 内置能力名（§15.1#7 的示例能力）。
@@ -22,9 +24,9 @@ const (
 	CapabilityUploadFile = "file.upload"
 )
 
-// RegisterCapabilities 把内置能力注册进 worker.Registry（§15.1#7/#8）：
+// RegisterCapabilities 把内置能力注册进 workerrt.Registry（§15.1#7/#8）：
 // 能力定义在 api/、实现在 biz、组织与注册在 worker。
-func RegisterCapabilities(reg *worker.Registry, verifier CredentialVerifier, uploader FileUploader) error {
+func RegisterCapabilities(reg *workerrt.Registry, verifier CredentialVerifier, uploader FileUploader) error {
 	if reg == nil {
 		return errors.New("biz: nil capability registry")
 	}
@@ -34,12 +36,12 @@ func RegisterCapabilities(reg *worker.Registry, verifier CredentialVerifier, upl
 	if uploader == nil {
 		uploader = DefaultUploader{}
 	}
-	if err := reg.Register(worker.Func{
-		D: worker.Descriptor{Name: CapabilityVerifyPassword, Description: "verify host credentials (ssh/tcp)"},
-		F: func(ctx context.Context, req worker.Request) (worker.Response, error) {
+	if err := reg.Register(workerrt.Func{
+		D: workerrt.Descriptor{Name: CapabilityVerifyPassword, Description: "verify host credentials (ssh/tcp)"},
+		F: func(ctx context.Context, req workerrt.Request) (workerrt.Response, error) {
 			in := &workerv1.VerifyPasswordRequest{}
 			if err := proto.Unmarshal(req.Payload, in); err != nil {
-				return worker.Response{}, err
+				return workerrt.Response{}, err
 			}
 			res, err := verifier.Verify(ctx, VerifyRequest{
 				Host:     in.GetHost(),
@@ -50,24 +52,24 @@ func RegisterCapabilities(reg *worker.Registry, verifier CredentialVerifier, upl
 				Timeout:  durationFromMS(in.GetTimeoutMs()),
 			})
 			if err != nil {
-				return worker.Response{}, err
+				return workerrt.Response{}, err
 			}
 			out := &workerv1.VerifyPasswordResponse{Ok: res.OK, Message: res.Message}
 			payload, err := proto.Marshal(out)
 			if err != nil {
-				return worker.Response{}, err
+				return workerrt.Response{}, err
 			}
-			return worker.Response{Payload: payload}, nil
+			return workerrt.Response{Payload: payload}, nil
 		},
 	}); err != nil {
 		return err
 	}
-	return reg.Register(worker.Func{
-		D: worker.Descriptor{Name: CapabilityUploadFile, Description: "upload a file to a target host"},
-		F: func(ctx context.Context, req worker.Request) (worker.Response, error) {
+	return reg.Register(workerrt.Func{
+		D: workerrt.Descriptor{Name: CapabilityUploadFile, Description: "upload a file to a target host"},
+		F: func(ctx context.Context, req workerrt.Request) (workerrt.Response, error) {
 			in := &workerv1.UploadFileRequest{}
 			if err := proto.Unmarshal(req.Payload, in); err != nil {
-				return worker.Response{}, err
+				return workerrt.Response{}, err
 			}
 			meta := in.GetMeta()
 			n, err := uploader.Upload(ctx, UploadRequest{
@@ -81,14 +83,14 @@ func RegisterCapabilities(reg *worker.Registry, verifier CredentialVerifier, upl
 				Content:        in.GetContent(),
 			})
 			if err != nil {
-				return worker.Response{}, err
+				return workerrt.Response{}, err
 			}
 			out := &workerv1.UploadFileResponse{Ok: true, Written: n}
 			payload, err := proto.Marshal(out)
 			if err != nil {
-				return worker.Response{}, err
+				return workerrt.Response{}, err
 			}
-			return worker.Response{Payload: payload}, nil
+			return workerrt.Response{Payload: payload}, nil
 		},
 	})
 }
@@ -102,16 +104,16 @@ func durationFromMS(ms int32) time.Duration {
 }
 
 // CapabilityServer 实现 worker/v1.CapabilityService（§15.1#7）：RPC 适配在本包，
-// 能力组织与调用统一走 worker.Registry（§15.1#8）。
+// 能力组织与调用统一走 workerrt.Registry（§15.1#8）。
 type CapabilityServer struct {
 	workerv1.UnimplementedCapabilityServiceServer
 
-	registry *worker.Registry
+	registry *workerrt.Registry
 	metrics  *obs.Metrics
 }
 
 // NewCapabilityServer 构造能力服务端。
-func NewCapabilityServer(registry *worker.Registry, metrics *obs.Metrics) *CapabilityServer {
+func NewCapabilityServer(registry *workerrt.Registry, metrics *obs.Metrics) *CapabilityServer {
 	return &CapabilityServer{registry: registry, metrics: metrics}
 }
 
@@ -194,7 +196,7 @@ func (s *CapabilityServer) UploadFile(stream workerv1.CapabilityService_UploadFi
 }
 
 func (s *CapabilityServer) invoke(ctx context.Context, name string, payload []byte, meta map[string]string) (*workerv1.InvokeResponse, error) {
-	resp, err := s.registry.Invoke(ctx, worker.Request{Name: name, Payload: payload, Metadata: meta})
+	resp, err := s.registry.Invoke(ctx, workerrt.Request{Name: name, Payload: payload, Metadata: meta})
 	if err != nil {
 		if s.metrics != nil {
 			s.metrics.CapabilityInvokeRecord(ctx, name, "error", 1)

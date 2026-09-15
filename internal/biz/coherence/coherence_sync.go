@@ -1,4 +1,4 @@
-package biz
+package coherence
 
 import (
 	"context"
@@ -241,7 +241,7 @@ func (p *CoherencePuller) PullOnce(ctx context.Context) error {
 	if p.dialer == nil || p.nodes == nil {
 		return errors.New("biz: coherence puller missing dialer or cluster view")
 	}
-	scheduler, ok := p.nodes.Node(schedulerNodeID(p.nodes))
+	scheduler, ok := p.nodes.Node(SchedulerNodeID(p.nodes))
 	if !ok || scheduler.Address == "" {
 		return errors.New("biz: no scheduler node to pull coherence from")
 	}
@@ -281,7 +281,7 @@ func (p *CoherencePuller) PullOnce(ctx context.Context) error {
 	return nil
 }
 
-func schedulerNodeID(nodes cluster.Resolver) string {
+func SchedulerNodeID(nodes cluster.Resolver) string {
 	type snapshotter interface{ Snapshot() cluster.Info }
 	if s, ok := nodes.(snapshotter); ok {
 		return s.Snapshot().SchedulerNodeID

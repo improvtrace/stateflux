@@ -1,4 +1,4 @@
-package biz
+package task
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	taskv1 "github.com/improvtrace/stateflux/api/stateflux/task/v1"
-	"github.com/improvtrace/stateflux/internal/task"
+	domaintask "github.com/improvtrace/stateflux/internal/task"
 	"github.com/improvtrace/stateflux/internal/task/factory"
 	"github.com/improvtrace/stateflux/internal/worker"
 )
@@ -39,13 +39,13 @@ func (*HeartbeatFactory) Name() string { return "demo.heartbeat" }
 func (f *HeartbeatFactory) Interval() time.Duration { return f.interval }
 
 // Generate 实现 factory.Factory：本窗口内至多一个心跳任务。
-func (f *HeartbeatFactory) Generate(_ context.Context, now time.Time) ([]task.Task, error) {
+func (f *HeartbeatFactory) Generate(_ context.Context, now time.Time) ([]domaintask.Task, error) {
 	if f.interval <= 0 {
 		return nil, nil
 	}
 	window := now.Unix() / int64(f.interval.Seconds())
-	return []task.Task{task.FuncTask{
-		S: task.Spec{
+	return []domaintask.Task{domaintask.FuncTask{
+		S: domaintask.Spec{
 			Type:           DemoType,
 			Operator:       DemoOperatorBeat,
 			Priority:       50,
@@ -98,7 +98,7 @@ func RegisterHandlers(reg *worker.HandlerRegistry) error {
 
 // RegisterPrototypes 注册 codec 可解析的任务原型（§15.1#13）：异步分发/消费的
 // TaskMessage 必须在这里登记，codec 才能按签名重建。
-func RegisterPrototypes(reg *task.Registry) error {
+func RegisterPrototypes(reg *domaintask.Registry) error {
 	if reg == nil {
 		return errors.New("biz: nil task registry")
 	}

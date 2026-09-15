@@ -14,7 +14,10 @@ import (
 	forwardv1 "github.com/improvtrace/stateflux/api/stateflux/forward/v1"
 	taskv1 "github.com/improvtrace/stateflux/api/stateflux/task/v1"
 	workerv1 "github.com/improvtrace/stateflux/api/stateflux/worker/v1"
-	"github.com/improvtrace/stateflux/internal/biz"
+	bizcoherence "github.com/improvtrace/stateflux/internal/biz/coherence"
+	bizdispatch "github.com/improvtrace/stateflux/internal/biz/dispatch"
+	biztask "github.com/improvtrace/stateflux/internal/biz/task"
+	bizworker "github.com/improvtrace/stateflux/internal/biz/worker"
 	"github.com/improvtrace/stateflux/internal/cluster"
 	"github.com/improvtrace/stateflux/internal/config"
 	"github.com/improvtrace/stateflux/internal/domain"
@@ -54,7 +57,7 @@ func provideSnowflake(cfg config.Config) *domain.Snowflake {
 // provideTaskRegistry 构造任务原型注册表并登记内置原型（§15.1#13）。
 func provideTaskRegistry() (*task.Registry, error) {
 	reg := task.NewRegistry()
-	if err := biz.RegisterPrototypes(reg); err != nil {
+	if err := biztask.RegisterPrototypes(reg); err != nil {
 		return nil, err
 	}
 	return reg, nil
@@ -68,7 +71,7 @@ func provideCodec(reg *task.Registry) *codec.Codec { return codec.New(reg) }
 // provideCapabilityRegistry 构造能力注册表并注册内置能力（§15.1#7/#8）。
 func provideCapabilityRegistry() (*worker.Registry, error) {
 	reg := worker.NewRegistry()
-	if err := biz.RegisterCapabilities(reg, biz.DefaultVerifier{}, biz.DefaultUploader{}); err != nil {
+	if err := bizworker.RegisterCapabilities(reg, bizworker.DefaultVerifier{}, bizworker.DefaultUploader{}); err != nil {
 		return nil, err
 	}
 	return reg, nil
@@ -77,19 +80,19 @@ func provideCapabilityRegistry() (*worker.Registry, error) {
 // provideHandlerRegistry 构造 handler 注册表并注册内置 handler。
 func provideHandlerRegistry() (*worker.HandlerRegistry, error) {
 	reg := worker.NewHandlerRegistry()
-	if err := biz.RegisterHandlers(reg); err != nil {
+	if err := biztask.RegisterHandlers(reg); err != nil {
 		return nil, err
 	}
 	return reg, nil
 }
 
 // provideResultPublisher 构造结果发布器（worker.ResultSink）。
-func provideResultPublisher(cfg config.Config, bus *eventbus.EventBus, cache *cluster.Cache, view cacheview.View) *biz.ResultPublisher {
+func provideResultPublisher(cfg config.Config, bus *eventbus.EventBus, cache *cluster.Cache, view cacheview.View) *biztask.ResultPublisher {
 	channel := cfg.Dispatch.ResultChannel
 	if channel == "" {
 		channel = ChannelStream
 	}
-	return biz.NewResultPublisher(biz.ResultPublisherOptions{
+	return biztask.NewResultPublisher(biztask.ResultPublisherOptions{
 		Bus:         bus,
 		ChannelName: channel,
 		Nodes:       cache,
@@ -99,14 +102,14 @@ func provideResultPublisher(cfg config.Config, bus *eventbus.EventBus, cache *cl
 }
 
 // provideWorkerRuntime 构造执行运行时（§5.4）。
-func provideWorkerRuntime(cfg config.Config, bus *eventbus.EventBus, cdc *codec.Codec, handlers *worker.HandlerRegistry, publisher *biz.ResultPublisher, view cacheview.View, metrics *obs.Metrics) *worker.Runtime {
+func provideWorkerRuntime(cfg config.Config, bus *eventbus.EventBus, cdc *codec.Codec, handlers *worker.HandlerRegistry, publisher *biztask.ResultPublisher, view cacheview.View, metrics *obs.Metrics) *worker.Runtime {
 	return worker.NewRuntime(worker.RuntimeOptions{
 		WAL:            provideWAL(cfg),
 		Bus:            bus,
 		Codec:          cdc,
 		Handlers:       handlers,
 		Queues:         cfg.Runtime.WorkerQueues,
-		QueueSource:    biz.NewQueueSource(view, cfg.Runtime.WorkerQueues),
+		QueueSource:    bizworker.NewQueueSource(view, cfg.Runtime.WorkerQueues),
 		QueueRefresh:   cfg.Coherence.SyncInterval,
 		NodeID:         cfg.Node.NodeID,
 		ResultSink:     publisher.Publish,
@@ -160,8 +163,8 @@ func provideDispatcher(cfg config.Config, bus *eventbus.EventBus, cache *cluster
 }
 
 // provideDispatchServer 构造分发服务端（§15.1#5）。
-func provideDispatchServer(cfg config.Config, d *dispatch.Dispatcher, cache *cluster.Cache, fwd *forward.Forwarder, metrics *obs.Metrics) *biz.DispatchServer {
-	return biz.NewDispatchServer(biz.DispatchServerOptions{
+func provideDispatchServer(cfg config.Config, d *dispatch.Dispatcher, cache *cluster.Cache, fwd *forward.Forwarder, metrics *obs.Metrics) *bizdispatch.DispatchServer {
+	return bizdispatch.NewDispatchServer(bizdispatch.DispatchServerOptions{
 		Dispatcher: d,
 		Nodes:      cache,
 		Forwarder:  fwd,
@@ -174,19 +177,19 @@ func provideDispatchServer(cfg config.Config, d *dispatch.Dispatcher, cache *clu
 // ---- 共识 ----
 
 // provideCoherenceStore 构造共识快照持有者（§15.1#4）。
-func provideCoherenceStore() *biz.CoherenceStore { return biz.NewCoherenceStore() }
+func provideCoherenceStore() *bizcoherence.CoherenceStore { return bizcoherence.NewCoherenceStore() }
 
 // provideCoherenceServer 构造共识服务端（§15.1#4）。
-func provideCoherenceServer(store *biz.CoherenceStore, view cacheview.View, metrics *obs.Metrics) *biz.CoherenceServer {
-	return biz.NewCoherenceServer(store, view, metrics)
+func provideCoherenceServer(store *bizcoherence.CoherenceStore, view cacheview.View, metrics *obs.Metrics) *bizcoherence.CoherenceServer {
+	return bizcoherence.NewCoherenceServer(store, view, metrics)
 }
 
 // provideCoherenceSyncer 构造调度侧共识同步器：分配全部 WorkerQueues。
-func provideCoherenceSyncer(cfg config.Config, store *biz.CoherenceStore, cache *cluster.Cache, dialer *rpc.Dialer, metrics *obs.Metrics) *biz.CoherenceSyncer {
-	pusher := biz.NewCoherencePusher(dialer, cache, cfg.Cluster.Timeout)
-	return biz.NewCoherenceSyncer(biz.CoherenceSyncerOptions{
+func provideCoherenceSyncer(cfg config.Config, store *bizcoherence.CoherenceStore, cache *cluster.Cache, dialer *rpc.Dialer, metrics *obs.Metrics) *bizcoherence.CoherenceSyncer {
+	pusher := bizcoherence.NewCoherencePusher(dialer, cache, cfg.Cluster.Timeout)
+	return bizcoherence.NewCoherenceSyncer(bizcoherence.CoherenceSyncerOptions{
 		Store:     store,
-		Allocator: biz.Allocator{SchedulerNodeID: cfg.Node.NodeID},
+		Allocator: bizcoherence.Allocator{SchedulerNodeID: cfg.Node.NodeID},
 		Pusher:    pusher,
 		Nodes:     cache,
 		Queues:    cfg.Runtime.WorkerQueues,
@@ -196,8 +199,8 @@ func provideCoherenceSyncer(cfg config.Config, store *biz.CoherenceStore, cache 
 }
 
 // provideCoherencePuller 构造执行侧共识拉取器（§15.1#4）。
-func provideCoherencePuller(cfg config.Config, store *biz.CoherenceStore, cache *cluster.Cache, dialer *rpc.Dialer, view cacheview.View, metrics *obs.Metrics) *biz.CoherencePuller {
-	return biz.NewCoherencePuller(biz.CoherencePullerOptions{
+func provideCoherencePuller(cfg config.Config, store *bizcoherence.CoherenceStore, cache *cluster.Cache, dialer *rpc.Dialer, view cacheview.View, metrics *obs.Metrics) *bizcoherence.CoherencePuller {
+	return bizcoherence.NewCoherencePuller(bizcoherence.CoherencePullerOptions{
 		Store:    store,
 		View:     view,
 		Dialer:   dialer,
@@ -220,7 +223,7 @@ func provideCollector(store repository.Store, metrics *obs.Metrics) *collector.C
 func provideCollectorRunner(cfg config.Config, bus *eventbus.EventBus, c *collector.Collector, metrics *obs.Metrics) *collector.Runner {
 	channel := cfg.Dispatch.ResultChannel
 	if channel == ChannelStream {
-		// 默认结果路径由 biz.ExecutorServer.ResultStream 直接归集，无需订阅。
+		// 默认结果路径由 biztask.ExecutorServer.ResultStream 直接归集，无需订阅。
 		channel = ""
 	}
 	return collector.NewRunner(collector.RunnerOptions{Bus: bus, ChannelName: channel, Collector: c, Metrics: metrics})
@@ -290,7 +293,7 @@ func provideTaskNotifier(cfg config.Config) (*data.TaskNotifier, func()) {
 }
 
 // provideSchedulerGroup 按配置构造多个调度实例（不同触发方式，§15.1#11）。
-func provideSchedulerGroup(cfg config.Config, cycle *scheduler.LedgerCycle, store *biz.CoherenceStore, notifier *data.TaskNotifier, metrics *obs.Metrics) *scheduler.Group {
+func provideSchedulerGroup(cfg config.Config, cycle *scheduler.LedgerCycle, store *bizcoherence.CoherenceStore, notifier *data.TaskNotifier, metrics *obs.Metrics) *scheduler.Group {
 	names := cfg.Runtime.SchedulerTriggers
 	if len(names) == 0 {
 		names = []string{"tick"}
@@ -331,40 +334,40 @@ func provideSchedulerGroup(cfg config.Config, cycle *scheduler.LedgerCycle, stor
 // provideFactoryRegistry 构造工厂注册表并注册内置工厂（§15.1#12）。
 func provideFactoryRegistry(cfg config.Config) (*factory.Registry, error) {
 	reg := factory.NewRegistry()
-	if err := biz.RegisterFactories(reg, cfg.Runtime.FactoryInterval, ChannelDefault); err != nil {
+	if err := biztask.RegisterFactories(reg, cfg.Runtime.FactoryInterval, ChannelDefault); err != nil {
 		return nil, err
 	}
 	return reg, nil
 }
 
 // provideFactoryManager 构造工厂运行器。
-func provideFactoryManager(reg *factory.Registry, e *biz.Enqueuer) *factory.Manager {
+func provideFactoryManager(reg *factory.Registry, e *biztask.Enqueuer) *factory.Manager {
 	return factory.NewManager(reg, e.Sink())
 }
 
 // provideEnqueuer 构造入队器（§5.1）。
-func provideEnqueuer(store repository.Store, ids *domain.Snowflake, cfg config.Config) *biz.Enqueuer {
-	return biz.NewEnqueuer(store, ids, ChannelDefault)
+func provideEnqueuer(store repository.Store, ids *domain.Snowflake, cfg config.Config) *biztask.Enqueuer {
+	return biztask.NewEnqueuer(store, ids, ChannelDefault)
 }
 
 // ---- 服务端 ----
 
 // provideExecutorServer 构造 ExecutorService 服务端（§7）。
-func provideExecutorServer(rt *worker.Runtime, c *collector.Collector, metrics *obs.Metrics) *biz.ExecutorServer {
-	return biz.NewExecutorServer(rt, c, metrics)
+func provideExecutorServer(rt *worker.Runtime, c *collector.Collector, metrics *obs.Metrics) *biztask.ExecutorServer {
+	return biztask.NewExecutorServer(rt, c, metrics)
 }
 
 // provideCapabilityServer 构造 CapabilityService 服务端（§15.1#7）。
-func provideCapabilityServer(reg *worker.Registry, metrics *obs.Metrics) *biz.CapabilityServer {
-	return biz.NewCapabilityServer(reg, metrics)
+func provideCapabilityServer(reg *worker.Registry, metrics *obs.Metrics) *bizworker.CapabilityServer {
+	return bizworker.NewCapabilityServer(reg, metrics)
 }
 
 // provideGRPCServer 注册全部契约服务（§7、§15.1）。
 func provideGRPCServer(
-	executor *biz.ExecutorServer,
-	capability *biz.CapabilityServer,
-	dispatchSrv *biz.DispatchServer,
-	coherence *biz.CoherenceServer,
+	executor *biztask.ExecutorServer,
+	capability *bizworker.CapabilityServer,
+	dispatchSrv *bizdispatch.DispatchServer,
+	coherence *bizcoherence.CoherenceServer,
 	forwardSrv *forward.Server,
 ) *grpc.Server {
 	s := grpc.NewServer()
@@ -494,9 +497,13 @@ func provideReconcileComponent(r *reconcile.Reconciler) reconcileComponent {
 	return reconcileComponent{v: r}
 }
 
-func provideSyncerComponent(s *biz.CoherenceSyncer) syncerComponent { return syncerComponent{v: s} }
+func provideSyncerComponent(s *bizcoherence.CoherenceSyncer) syncerComponent {
+	return syncerComponent{v: s}
+}
 
-func providePullerComponent(p *biz.CoherencePuller) pullerComponent { return pullerComponent{v: p} }
+func providePullerComponent(p *bizcoherence.CoherencePuller) pullerComponent {
+	return pullerComponent{v: p}
+}
 
 func provideFactoryComponent(m *factory.Manager) factoryComponent {
 	return factoryComponent{v: newRunnerComponent("factories", func(ctx context.Context) error { m.Run(ctx); return nil })}
@@ -518,10 +525,10 @@ func provideApp(
 	httpServer *http.Server,
 	components []Component,
 	forwardRegistry *forward.Registry,
-	dispatchServer *biz.DispatchServer,
+	dispatchServer *bizdispatch.DispatchServer,
 ) (*App, error) {
 	if forwardRegistry != nil && dispatchServer != nil {
-		if err := forwardRegistry.Register(biz.DispatchMethod, dispatchServer.HandleForwarded); err != nil {
+		if err := forwardRegistry.Register(bizdispatch.DispatchMethod, dispatchServer.HandleForwarded); err != nil {
 			return nil, err
 		}
 	}

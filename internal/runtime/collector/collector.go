@@ -47,7 +47,7 @@ func New(opts Options) *Collector {
 	return &Collector{ledger: opts.Ledger, metrics: opts.Metrics, onTerminal: opts.OnTerminal}
 }
 
-// Consume 归集一条结果，实现 biz.ResultConsumer。
+// Consume 归集一条结果，实现 biztask.ResultConsumer。
 func (c *Collector) Consume(ctx context.Context, ev *taskv1.ResultEvent) error {
 	if c.ledger == nil {
 		return errors.New("runtime/collector: nil ledger")

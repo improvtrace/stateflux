@@ -13,7 +13,11 @@ stateflux/
 │                     # （工具链命令如实时指标查询，按需在 cmd/ 扩展）
 ├── internal/         # 引擎收编（Go internal 可见性：外部模块禁止 import；无顶层公开引擎包）
 │   ├── server/       # 编排层：biz + scheduler 运行时 + worker 运行时的装配与启停 + Handler 注册点（§1.2.8）
-│   ├── biz/          # task/v1 服务端业务：Execute 执行编排 / Collect 结果上报（经 server 装配注入 worker）
+│   ├── biz/          # api 契约服务端实现归组（按 api 域拆分子包，与 api/stateflux 对齐）
+│   │   ├── task/      #   api/stateflux/task/v1：Execute 编排 / ResultStream·Collect 归集 / 工厂入队
+│   │   ├── worker/    #   api/stateflux/worker/v1：CapabilityService（能力注册、验密、上传、队列视图）
+│   │   ├── coherence/ #   api/stateflux/coherence/v1：共识快照持有与调度↔执行同步
+│   │   └── dispatch/  #   api/dispatch/v1：DispatchService 对外分发与节点间转发
 │   ├── runtime/      # 控制面（调度侧）运行时归组：随选举启停，仅调度节点运行
 │   │   ├── scheduler/  # 约束晋升/claim → EventBus channel 分发
 │   │   ├── collector/  # 订阅 ResultEvent → 终态事务/回调派生

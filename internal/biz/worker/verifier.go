@@ -1,8 +1,4 @@
-// Package biz 实现 api/ 下契约的服务端业务（§15.1#2）：任务执行接入（ExecutorService）、
-// 执行节点能力（CapabilityService）、任务分发（DispatchService）、共识信息（CoherenceService）、
-// 具体 factory 与 handler。gRPC 传输由 internal/server 托管，biz 与 worker/scheduler 相互
-// 不 import（§8）。
-package biz
+package worker
 
 import (
 	"context"

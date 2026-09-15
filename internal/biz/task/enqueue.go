@@ -1,4 +1,4 @@
-package biz
+package task
 
 import (
 	"context"
@@ -10,7 +10,7 @@ import (
 	"github.com/improvtrace/stateflux/internal/domain"
 	"github.com/improvtrace/stateflux/internal/domain/repository"
 	"github.com/improvtrace/stateflux/internal/domain/schema"
-	"github.com/improvtrace/stateflux/internal/task"
+	domaintask "github.com/improvtrace/stateflux/internal/task"
 	"github.com/improvtrace/stateflux/internal/task/factory"
 )
 
@@ -29,14 +29,14 @@ func NewEnqueuer(store repository.Store, ids *domain.Snowflake, defaultChannel s
 
 // Sink 返回 factory.Sink 适配器。
 func (e *Enqueuer) Sink() factory.Sink {
-	return func(ctx context.Context, t task.Task) error {
+	return func(ctx context.Context, t domaintask.Task) error {
 		_, _, err := e.Enqueue(ctx, t)
 		return err
 	}
 }
 
 // Enqueue 写入一个任务，返回最终 task_id 与是否新建。
-func (e *Enqueuer) Enqueue(ctx context.Context, t task.Task) (int64, bool, error) {
+func (e *Enqueuer) Enqueue(ctx context.Context, t domaintask.Task) (int64, bool, error) {
 	if e.store == nil || e.ids == nil {
 		return 0, false, errors.New("biz: enqueuer not configured")
 	}

@@ -1,4 +1,6 @@
-package biz
+// Package task 实现 api/stateflux/task/v1 的服务端业务（§15.1#2）：Execute 同步执行编排、
+// ResultStream/Collect 结果归集、结果发布适配、工厂入队与内置演示工厂/handler。
+package task
 
 import (
 	"context"
