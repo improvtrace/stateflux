@@ -37,7 +37,11 @@ api/
     └── worker/v1/         # 执行节点能力 RPC
 internal/
 ├── server/                # wire 装配 + 服务生命周期
-├── biz/                   # api 全部服务端实现 + 具体 factory/能力/handler
+├── biz/                   # api 契约服务端实现（按 api 域拆分子包）
+│   ├── task/              #   api/stateflux/task/v1：Execute/归集 + 工厂入队
+│   ├── worker/            #   api/stateflux/worker/v1：能力 RPC + 验密/上传/队列视图
+│   ├── coherence/         #   api/stateflux/coherence/v1：共识快照与调度↔执行同步
+│   └── dispatch/          #   api/dispatch/v1：对外分发与节点间转发
 ├── cluster/               # ClusterView：grpc / http / static
 ├── forward/               # 节点间 RPC 转发（环路保护）
 ├── worker/                # 能力注册/管理 + 执行运行时（WAL）
@@ -57,11 +61,28 @@ internal/
 | `STATEFLUX_CLUSTER_ENDPOINT` | – | 外置集群视图地址（grpc/http） |
 | `STATEFLUX_RUNTIME_SCHEDULER_TRIGGERS` | `tick` | 触发方式：`tick,notify,coherence,manual`（多实例） |
 | `STATEFLUX_DISPATCH_RESULT_CHANNEL` | `stream` | 结果归集通道，可换 `redis-pubsub`/`redis-list` |
+| `STATEFLUX_SERVER_SHUTDOWN_TIMEOUT` | `10s` | 优雅退出总预算（停接入 → 逆序停组件 → 强制停 gRPC） |
 | `STATEFLUX_RUNTIME_WAL_DIR` | `.stateflux-wal` | 结果 WAL 目录；空为进程内 WAL |
 | `STATEFLUX_PG_SEARCH_PATH` | `public` | 固定 search_path（避免用户名与 schema 同名） |
 
 控制面（Scheduler/Collector/Reconciler/Factory/Coherence 同步）仅在外部选举指向本实例时运行；
 执行侧（worker、coherence 拉取）常驻所有节点（§2.1）。
+
+## 优雅退出
+
+进程收到首个 `SIGINT`/`SIGTERM` 后按固定顺序退出，总预算由 `STATEFLUX_SERVER_SHUTDOWN_TIMEOUT`
+约束（默认 10s）：
+
+1. `/readyz` 立即转 `503`，通知负载均衡/服务发现摘除流量（`/healthz` 保持存活探针语义）；
+2. gRPC `GracefulStop` + HTTP `Shutdown`：停止接入新请求并排空在途 RPC/HTTP；
+3. 逆序停止全部后台组件（worker/调度/归集/对账/共识同步/工厂），最后关闭 eventbus 的
+   结果流等底层通道（使 gRPC `GracefulStop` 能立即排空）；worker 会等待在途执行写完 WAL
+   后再关闭本地结果日志；
+4. 预算内未排空则强制 `grpc.Stop`；随后逐步限时释放装配资源（DB 连接池、PG 监听、集群
+   视图等，每步上限 5s，超时告警并继续）并刷出 OTel 数据。
+
+再次收到信号即强制退出（退出码 2），避免关机无限挂起；启动阶段任一组件启动失败会回滚已启动
+组件并关闭服务面，不留半启动状态。
 
 ## 开发
 

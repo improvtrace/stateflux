@@ -82,6 +82,10 @@ type Runtime struct {
 	subs   map[string]channel.Subscription
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+
+	// execMu 保护单次执行的生命周期：Execute 持读锁，Stop 取写锁等待在途执行收尾，
+	// 保证关闭 WAL 前没有结果仍在写入（优雅退出的执行侧 drain）。
+	execMu sync.RWMutex
 }
 
 // NewRuntime 构造执行运行时。
@@ -232,6 +236,10 @@ func (r *Runtime) Stop() error {
 		_ = sub.Close()
 	}
 	r.wg.Wait()
+	// 停止订阅与循环后，等待在途 Execute 收尾再关闭 WAL：避免结果写入已关闭的日志。
+	// handler 受各自执行预算约束，最坏情况由上层关机预算兜底（App.ShutdownTimeout）。
+	r.execMu.Lock()
+	defer r.execMu.Unlock()
 	if r.wal != nil {
 		_ = r.wal.Close()
 	}
@@ -281,6 +289,10 @@ func (r *Runtime) decode(payload []byte) (*taskv1.TaskMessage, error) {
 
 // Execute 同步执行一个任务消息并发布结果（供 ExecutorService.Execute 与订阅路径共用）。
 func (r *Runtime) Execute(ctx context.Context, msg *taskv1.TaskMessage) *taskv1.ResultEvent {
+	// 在途执行登记：Stop 取写锁时等待这里释放，确保执行收尾后才关闭 WAL。
+	r.execMu.RLock()
+	defer r.execMu.RUnlock()
+
 	start := time.Now()
 	ev := &taskv1.ResultEvent{
 		TaskId:         msg.GetTaskId(),

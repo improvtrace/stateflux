@@ -38,7 +38,7 @@ func provideClusterView(cfg config.Config) (cluster.View, error) {
 // provideClusterCache 包装带快照的集群视图（热路径无网络 I/O）。
 func provideClusterCache(ctx context.Context, cfg config.Config, view cluster.View) (*cluster.Cache, func()) {
 	cache := cluster.NewCache(ctx, view, cfg.Cluster.PollInterval)
-	return cache, func() { _ = cache.Close() }
+	return cache, boundedCleanup("cluster-cache", cfg.Server.ShutdownTimeout, func() { _ = cache.Close() })
 }
 
 // provideCacheView 构造任务异步执行视图（§15.1#9）：Redis 可用时走 Redis，否则退化为

@@ -289,7 +289,7 @@ func provideTaskNotifier(cfg config.Config) (*data.TaskNotifier, func()) {
 	if err != nil {
 		return nil, func() {}
 	}
-	return n, func() { _ = n.Close() }
+	return n, boundedCleanup("pg-notify", cfg.Server.ShutdownTimeout, func() { _ = n.Close() })
 }
 
 // provideSchedulerGroup 按配置构造多个调度实例（不同触发方式，§15.1#11）。
@@ -435,6 +435,7 @@ func (c *runnerComponent) Stop() error {
 func provideComponents(
 	cfg config.Config,
 	cache *cluster.Cache,
+	bus *eventbus.EventBus,
 	writer workerComponent,
 	schedulers schedulerComponent,
 	reconciler reconcileComponent,
@@ -443,7 +444,12 @@ func provideComponents(
 	factories factoryComponent,
 	resultRunner collectorRunnerComponent,
 ) []Component {
-	components := make([]Component, 0, 8)
+	components := make([]Component, 0, 9)
+	// eventbus 最先启动、最后停止：待全部组件停稳后再关闭结果流等底层通道，
+	// 服务端 GracefulStop 才能立即排空长连接，而不是等满关机预算。
+	if bus != nil {
+		components = append(components, eventBusComponent{bus: bus})
+	}
 	if writer.v != nil {
 		components = append(components, writer.v)
 	}
@@ -472,6 +478,21 @@ func provideComponents(
 		components = append(components, gate("reconcile", reconciler.v))
 	}
 	return components
+}
+
+// eventBusComponent 把 eventbus 的生命周期纳入组件链：Start 无操作，Stop 关闭全部
+// channel 底层连接（结果流客户端等）。
+type eventBusComponent struct{ bus *eventbus.EventBus }
+
+// Start 实现 Component：eventbus 在装配期已就绪。
+func (eventBusComponent) Start(context.Context) error { return nil }
+
+// Stop 实现 Component：关闭全部 channel（幂等）。
+func (c eventBusComponent) Stop() error {
+	if c.bus == nil {
+		return nil
+	}
+	return c.bus.Close()
 }
 
 // 以下具名包装类型用于让 wire 区分多个 Component 依赖。
@@ -515,7 +536,11 @@ func provideCollectorRunnerComponent(r *collector.Runner) collectorRunnerCompone
 
 // dataOpen 包装 data.Open 以便 wire 统一收集清理函数（§15.1#1）。
 func dataOpen(ctx context.Context, cfg config.Config) (*data.Data, func(), error) {
-	return data.Open(ctx, cfg)
+	d, cleanup, err := data.Open(ctx, cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	return d, boundedCleanup("data", cfg.Server.ShutdownTimeout, cleanup), nil
 }
 
 // provideApp 构造 App 并完成跨引用登记（转发方法注册，§15.1#6）。
@@ -526,6 +551,7 @@ func provideApp(
 	components []Component,
 	forwardRegistry *forward.Registry,
 	dispatchServer *bizdispatch.DispatchServer,
+	health *Health,
 ) (*App, error) {
 	if forwardRegistry != nil && dispatchServer != nil {
 		if err := forwardRegistry.Register(bizdispatch.DispatchMethod, dispatchServer.HandleForwarded); err != nil {
@@ -537,5 +563,6 @@ func provideApp(
 		GRPCServer: grpcServer,
 		HTTPServer: httpServer,
 		Components: components,
+		Health:     health,
 	}), nil
 }

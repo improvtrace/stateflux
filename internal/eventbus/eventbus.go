@@ -50,6 +50,7 @@ type (
 type EventBus struct {
 	mu       sync.RWMutex
 	channels map[string]channel.Channel
+	closed   bool
 }
 
 // NewEventBus 创建 eventbus 实例：channels 在创建时注册（逻辑 channel 名 → 实现）。
@@ -98,6 +99,40 @@ func (b *EventBus) Resolve(name string) (channel.Channel, error) {
 		return nil, fmt.Errorf("eventbus: unregistered channel %q", name)
 	}
 	return ch, nil
+}
+
+// Close 关闭全部已注册 channel（幂等）：释放底层连接与订阅（如结果流客户端），
+// 供进程优雅退出调用。只有实现 Close 的 channel 会被关闭；同一实例重复注册只关一次。
+// 关闭后各 channel 的行为由实现决定（例如 rpc stream 拒绝新的发送）。
+func (b *EventBus) Close() error {
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return nil
+	}
+	b.closed = true
+	channels := make([]channel.Channel, 0, len(b.channels))
+	seen := make(map[channel.Channel]struct{}, len(b.channels))
+	for _, ch := range b.channels {
+		if _, ok := seen[ch]; ok {
+			continue
+		}
+		seen[ch] = struct{}{}
+		channels = append(channels, ch)
+	}
+	b.mu.Unlock()
+
+	var errs []error
+	for _, ch := range channels {
+		closer, ok := ch.(interface{ Close() error })
+		if !ok {
+			continue
+		}
+		if err := closer.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("eventbus: close %T: %w", ch, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // Subscribe 订阅某节点的一类事件（system / result）：按 channel 名解析实现，

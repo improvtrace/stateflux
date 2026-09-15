@@ -76,7 +76,8 @@ func InitializeApplication(ctx context.Context, cfg config.Config) (*App, func()
 	forwardRegistry := provideForwardRegistry()
 	server := provideForwardServer(cfg, forwardRegistry, forwarder)
 	grpcServer := provideGRPCServer(executorServer, capabilityServer, dispatchServer, coherenceServer, server)
-	httpServer := NewHTTPServer(cfg)
+	health := NewHealth()
+	httpServer := NewHTTPServer(cfg, health)
 	serverWorkerComponent := provideWorkerComponent(runtime)
 	ledgerCycle := provideCycle(cfg, store, dispatcher, eventBus, metrics)
 	taskNotifier, cleanup3 := provideTaskNotifier(cfg)
@@ -101,8 +102,8 @@ func InitializeApplication(ctx context.Context, cfg config.Config) (*App, func()
 	serverFactoryComponent := provideFactoryComponent(manager)
 	runner := provideCollectorRunner(cfg, eventBus, collector, metrics)
 	serverCollectorRunnerComponent := provideCollectorRunnerComponent(runner)
-	v := provideComponents(cfg, cache, serverWorkerComponent, serverSchedulerComponent, serverReconcileComponent, serverSyncerComponent, serverPullerComponent, serverFactoryComponent, serverCollectorRunnerComponent)
-	app, err := provideApp(cfg, grpcServer, httpServer, v, forwardRegistry, dispatchServer)
+	v := provideComponents(cfg, cache, eventBus, serverWorkerComponent, serverSchedulerComponent, serverReconcileComponent, serverSyncerComponent, serverPullerComponent, serverFactoryComponent, serverCollectorRunnerComponent)
+	app, err := provideApp(cfg, grpcServer, httpServer, v, forwardRegistry, dispatchServer, health)
 	if err != nil {
 		cleanup3()
 		cleanup2()
@@ -173,6 +174,7 @@ var ProviderSet = wire.NewSet(
 	provideCapabilityServer,
 	provideGRPCServer,
 	provideComponents,
+	NewHealth,
 	NewHTTPServer,
 	provideApp,
 )

@@ -310,6 +310,7 @@ func FromEnv() Config {
 
 	envString(func(key, val string) { cfg.Server.GRPCAddr = val }, "STATEFLUX_SERVER_GRPC_ADDR")
 	envString(func(key, val string) { cfg.Server.HTTPAddr = val }, "STATEFLUX_SERVER_HTTP_ADDR")
+	envDuration(func(key string, val time.Duration) { cfg.Server.ShutdownTimeout = val }, "STATEFLUX_SERVER_SHUTDOWN_TIMEOUT")
 
 	envStrings(func(key string, val []string) { cfg.Runtime.SchedulerTriggers = val }, "STATEFLUX_RUNTIME_SCHEDULER_TRIGGERS")
 	envBool(func(key string, val bool) { cfg.Runtime.EnableCollector = val }, "STATEFLUX_RUNTIME_ENABLE_COLLECTOR")

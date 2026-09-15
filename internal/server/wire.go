@@ -77,6 +77,7 @@ var ProviderSet = wire.NewSet(
 	provideCapabilityServer,
 	provideGRPCServer,
 	provideComponents,
+	NewHealth,
 	NewHTTPServer,
 	provideApp,
 )
