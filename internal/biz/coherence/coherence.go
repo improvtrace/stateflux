@@ -153,7 +153,7 @@ type Allocator struct {
 func (a Allocator) Assign(queues []string, nodes []cluster.Node, revision int64, updatedUnixMs int64) *coherencev1.CoherenceState {
 	executors := make([]cluster.Node, 0, len(nodes))
 	for _, n := range nodes {
-		if n.HasRole(cluster.RoleExecutor) || len(n.Roles) == 0 {
+		if n.HasPermission(cluster.NodePermissionOperation) || len(n.Permissions) == 0 {
 			executors = append(executors, n)
 		}
 	}
@@ -174,11 +174,15 @@ func (a Allocator) Assign(queues []string, nodes []cluster.Node, revision int64,
 	}
 	for i, q := range sorted {
 		n := executors[i%len(executors)]
+		label := ""
+		if len(n.Labels) > 0 {
+			label = n.Labels[0]
+		}
 		state.Routes = append(state.Routes, &coherencev1.QueueRoute{
 			Queue:  q,
 			NodeId: n.ID,
 			Vpc:    n.VPC,
-			Label:  n.Label,
+			Label:  label,
 		})
 	}
 	return state

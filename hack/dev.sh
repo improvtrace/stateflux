@@ -24,14 +24,14 @@ case "${1:-}" in
     done
     ;;
   run)
-    go build -o stateflux ./cmd/stateflux
+    go build -o bin/stateflux ./cmd/stateflux
     export STATEFLUX_PG_DSN="${STATEFLUX_PG_DSN:-$PG_DSN_DEFAULT}"
     export STATEFLUX_CLUSTER_TRANSPORT="${STATEFLUX_CLUSTER_TRANSPORT:-static}"
     export STATEFLUX_CLUSTER_POLL_INTERVAL="${STATEFLUX_CLUSTER_POLL_INTERVAL:-2s}"
     export STATEFLUX_COHERENCE_SYNC_INTERVAL="${STATEFLUX_COHERENCE_SYNC_INTERVAL:-2s}"
     export STATEFLUX_RUNTIME_SCHEDULER_TRIGGERS="${STATEFLUX_RUNTIME_SCHEDULER_TRIGGERS:-tick,coherence}"
     export STATEFLUX_RUNTIME_FACTORY_INTERVAL="${STATEFLUX_RUNTIME_FACTORY_INTERVAL:-5s}"
-    exec ./stateflux
+    exec ./bin/stateflux
     ;;
   *)
     echo "usage: $0 up|down|migrate|run" >&2

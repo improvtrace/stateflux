@@ -5,7 +5,7 @@
 // 与确认条款的对应（§15.1#5）：
 //   - 语义：at_least_once（允许重试）/ at_most_once（失败即放弃）/ exactly_once（入口去重）；
 //   - 形态：异步 redis queue（单向，不等结果）/ 同步 rpc（请求-应答，立即拿到 ResultEvent）；
-//   - 节点间转发由服务层（internal/biz 的 DispatchService）经 internal/forward 完成，
+//   - 节点间转发由服务层（internal/biz 的 DispatchService）经 internal/biz/forward 完成，
 //     本包只负责「把任务交给目标节点」这一步，转发不改变归属。
 package dispatch
 
@@ -31,7 +31,7 @@ import (
 // 不发送（等视图更新或由 R1 收敛），而不是发到任意节点（§5.3）。
 var ErrNoTargetNode = errors.New("task/dispatch: no executor node matches task constraints")
 
-// Forwarder 是节点间转发的最小依赖面（internal/forward 实现，接口在此声明以避免
+// Forwarder 是节点间转发的最小依赖面（internal/biz/forward 实现，接口在此声明以避免
 // dispatch → forward → biz → dispatch 的环）。方法名与 forward.Forwarder 保持一致。
 type Forwarder interface {
 	Forward(ctx context.Context, targetNodeID, method string, payload []byte, headers map[string]string, ttl int32) ([]byte, error)

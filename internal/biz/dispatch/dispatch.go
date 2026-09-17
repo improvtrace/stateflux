@@ -1,4 +1,4 @@
-// Package dispatch 实现 api/dispatch/v1 的服务端业务（§15.1#5）：对外分发入口与节点间转发。
+// Package dispatch 实现 api/stateflux/dispatch/v1 的服务端业务（§15.1#5）：对外分发入口与节点间转发。
 package dispatch
 
 import (
@@ -8,11 +8,11 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	dispatchv1 "github.com/improvtrace/stateflux/api/dispatch/v1"
+	dispatchv1 "github.com/improvtrace/stateflux/api/stateflux/dispatch/v1"
 	bizcoherence "github.com/improvtrace/stateflux/internal/biz/coherence"
+	"github.com/improvtrace/stateflux/internal/biz/forward"
 	"github.com/improvtrace/stateflux/internal/cluster"
 	"github.com/improvtrace/stateflux/internal/config"
-	"github.com/improvtrace/stateflux/internal/forward"
 	"github.com/improvtrace/stateflux/internal/obs"
 	taskdispatch "github.com/improvtrace/stateflux/internal/task/dispatch"
 )
@@ -22,7 +22,7 @@ const DispatchMethod = "/dispatch.v1.DispatchService/Dispatch"
 
 // DispatchServer 实现 dispatch/v1.DispatchService（§15.1#5）：提供对外分发入口，
 // 支持 at_least_once / at_most_once / exactly_once 三种语义、redis 队列与 rpc 两种投递，
-// 并在目标非本节点时经 internal/forward 做节点间转发。
+// 并在目标非本节点时经 internal/biz/forward 做节点间转发。
 type DispatchServer struct {
 	dispatchv1.UnimplementedDispatchServiceServer
 

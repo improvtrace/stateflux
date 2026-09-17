@@ -75,7 +75,7 @@ func TestElectionGateFollowsScheduler(t *testing.T) {
 	defer cache.Close()
 
 	inner := &countingComponent{}
-	gate := newElectionGate("scheduler", cache, "self", inner, 20*time.Millisecond, nil)
+	gate := NewElectionGate("scheduler", cache, "self", cluster.NodePermissionSchedule, inner, 20*time.Millisecond, nil)
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()

@@ -4,45 +4,51 @@
 //go:build !wireinject
 // +build !wireinject
 
-package server
+package stateflux
 
 import (
 	"context"
 	"github.com/google/wire"
 	"github.com/improvtrace/stateflux/internal/config"
+	"github.com/improvtrace/stateflux/internal/server"
 )
 
 // Injectors from wire.go:
 
-// InitializeApplication 是 wire 生成的装配入口（§15.1#1）：cmd/stateflux 只调用它。
-func InitializeApplication(ctx context.Context, cfg config.Config) (*App, func(), error) {
-	data, cleanup, err := dataOpen(ctx, cfg)
+// newApplication 是 wire 的装配器（§15.1#1）：按配置装配出应用实例与释放函数，
+// 仅由 NewServeDeps 包装成 ServeDeps 注入 serve 子命令。
+func newApplication(ctx context.Context, cfg config.Config) (*server.App, func(), error) {
+	view, err := provideClusterView(cfg)
 	if err != nil {
+		return nil, nil, err
+	}
+	cache, cleanup := provideClusterCache(ctx, cfg, view)
+	string2 := provideNodeID(cache)
+	data, cleanup2, err := dataOpen(ctx, cfg)
+	if err != nil {
+		cleanup()
 		return nil, nil, err
 	}
 	dialer := provideDialer()
 	eventBus, err := provideEventBus(cfg, data, dialer)
 	if err != nil {
+		cleanup2()
 		cleanup()
 		return nil, nil, err
 	}
 	registry, err := provideTaskRegistry()
 	if err != nil {
+		cleanup2()
 		cleanup()
 		return nil, nil, err
 	}
 	codec := provideCodec(registry)
 	handlerRegistry, err := provideHandlerRegistry()
 	if err != nil {
+		cleanup2()
 		cleanup()
 		return nil, nil, err
 	}
-	view, err := provideClusterView(cfg)
-	if err != nil {
-		cleanup()
-		return nil, nil, err
-	}
-	cache, cleanup2 := provideClusterCache(ctx, cfg, view)
 	cacheviewView, err := provideCacheView(cfg, data)
 	if err != nil {
 		cleanup2()
@@ -56,8 +62,8 @@ func InitializeApplication(ctx context.Context, cfg config.Config) (*App, func()
 		cleanup()
 		return nil, nil, err
 	}
-	runtime := provideWorkerRuntime(cfg, eventBus, codec, handlerRegistry, resultPublisher, cacheviewView, metrics)
-	snowflake := provideSnowflake(cfg)
+	runtime := provideWorkerRuntime(cfg, string2, eventBus, codec, handlerRegistry, resultPublisher, cacheviewView, metrics)
+	snowflake := provideSnowflake(string2)
 	store := provideStore(data, snowflake)
 	collector := provideCollector(store, metrics)
 	executorServer := provideExecutorServer(runtime, collector, metrics)
@@ -68,28 +74,28 @@ func InitializeApplication(ctx context.Context, cfg config.Config) (*App, func()
 		return nil, nil, err
 	}
 	capabilityServer := provideCapabilityServer(workerRegistry, metrics)
-	dispatcher := provideDispatcher(cfg, eventBus, cache, cacheviewView, codec, metrics)
-	forwarder := provideForwarder(cfg, dialer, cache)
-	dispatchServer := provideDispatchServer(cfg, dispatcher, cache, forwarder, metrics)
+	dispatcher := provideDispatcher(cfg, string2, eventBus, cache, cacheviewView, codec, metrics)
+	forwarder := provideForwarder(cfg, string2, dialer, cache)
+	dispatchServer := provideDispatchServer(cfg, string2, dispatcher, cache, forwarder, metrics)
 	coherenceStore := provideCoherenceStore()
 	coherenceServer := provideCoherenceServer(coherenceStore, cacheviewView, metrics)
 	forwardRegistry := provideForwardRegistry()
-	server := provideForwardServer(cfg, forwardRegistry, forwarder)
-	grpcServer := provideGRPCServer(executorServer, capabilityServer, dispatchServer, coherenceServer, server)
-	health := NewHealth()
-	httpServer := NewHTTPServer(cfg, health)
-	serverWorkerComponent := provideWorkerComponent(runtime)
-	ledgerCycle := provideCycle(cfg, store, dispatcher, eventBus, metrics)
+	forwardServer := provideForwardServer(cfg, string2, forwardRegistry, forwarder)
+	grpcServer := provideGRPCServer(executorServer, capabilityServer, dispatchServer, coherenceServer, forwardServer)
+	health := server.NewHealth()
+	httpServer := server.NewHTTPServer(cfg, health)
+	statefluxWorkerComponent := provideWorkerComponent(runtime)
+	ledgerCycle := provideCycle(cfg, string2, store, dispatcher, eventBus, metrics)
 	taskNotifier, cleanup3 := provideTaskNotifier(cfg)
 	group := provideSchedulerGroup(cfg, ledgerCycle, coherenceStore, taskNotifier, metrics)
-	serverSchedulerComponent := provideSchedulerComponent(group)
+	statefluxSchedulerComponent := provideSchedulerComponent(group)
 	channelProbe := provideChannelProbe(data)
 	reconciler := provideReconciler(cfg, store, cacheviewView, channelProbe, metrics)
-	serverReconcileComponent := provideReconcileComponent(reconciler)
-	coherenceSyncer := provideCoherenceSyncer(cfg, coherenceStore, cache, dialer, metrics)
-	serverSyncerComponent := provideSyncerComponent(coherenceSyncer)
-	coherencePuller := provideCoherencePuller(cfg, coherenceStore, cache, dialer, cacheviewView, metrics)
-	serverPullerComponent := providePullerComponent(coherencePuller)
+	statefluxReconcileComponent := provideReconcileComponent(reconciler)
+	coherenceSyncer := provideCoherenceSyncer(cfg, string2, coherenceStore, cache, dialer, metrics)
+	statefluxSyncerComponent := provideSyncerComponent(coherenceSyncer)
+	coherencePuller := provideCoherencePuller(cfg, string2, coherenceStore, cache, dialer, cacheviewView, metrics)
+	statefluxPullerComponent := providePullerComponent(coherencePuller)
 	factoryRegistry, err := provideFactoryRegistry(cfg)
 	if err != nil {
 		cleanup3()
@@ -99,10 +105,10 @@ func InitializeApplication(ctx context.Context, cfg config.Config) (*App, func()
 	}
 	enqueuer := provideEnqueuer(store, snowflake, cfg)
 	manager := provideFactoryManager(factoryRegistry, enqueuer)
-	serverFactoryComponent := provideFactoryComponent(manager)
+	statefluxFactoryComponent := provideFactoryComponent(manager)
 	runner := provideCollectorRunner(cfg, eventBus, collector, metrics)
-	serverCollectorRunnerComponent := provideCollectorRunnerComponent(runner)
-	v := provideComponents(cfg, cache, eventBus, serverWorkerComponent, serverSchedulerComponent, serverReconcileComponent, serverSyncerComponent, serverPullerComponent, serverFactoryComponent, serverCollectorRunnerComponent)
+	statefluxCollectorRunnerComponent := provideCollectorRunnerComponent(runner)
+	v := provideComponents(cfg, string2, cache, eventBus, statefluxWorkerComponent, statefluxSchedulerComponent, statefluxReconcileComponent, statefluxSyncerComponent, statefluxPullerComponent, statefluxFactoryComponent, statefluxCollectorRunnerComponent)
 	app, err := provideApp(cfg, grpcServer, httpServer, v, forwardRegistry, dispatchServer, health)
 	if err != nil {
 		cleanup3()
@@ -126,6 +132,7 @@ var ProviderSet = wire.NewSet(
 	provideDialer,
 	provideClusterView,
 	provideClusterCache,
+	provideNodeID,
 	provideEventBus,
 	provideCacheView,
 	dataOpen,
@@ -173,8 +180,5 @@ var ProviderSet = wire.NewSet(
 	provideExecutorServer,
 	provideCapabilityServer,
 	provideGRPCServer,
-	provideComponents,
-	NewHealth,
-	NewHTTPServer,
-	provideApp,
+	provideComponents, server.NewHealth, server.NewHTTPServer, provideApp,
 )

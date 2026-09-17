@@ -136,7 +136,7 @@ func (a *App) Run(ctx context.Context) error {
 		return errors.Join(startErr, a.shutdown(started))
 	}
 	a.health.SetReady(true)
-	log.Printf("server: ready (grpc=%s http=%s components=%d)", a.cfg.Server.GRPCAddr, a.cfg.Server.HTTPAddr, len(started))
+	log.Printf("stateflux: [ready] serving grpc=%s http=%s components=%d", a.cfg.Server.GRPCAddr, a.cfg.Server.HTTPAddr, len(started))
 
 	var runErr error
 	select {
@@ -144,7 +144,7 @@ func (a *App) Run(ctx context.Context) error {
 	case runErr = <-serveErrCh:
 	}
 	a.health.SetReady(false)
-	log.Printf("server: shutting down (timeout=%s)", a.shutdownTimeout())
+	log.Printf("stateflux: [shutdown] draining connections (budget=%s)", a.shutdownTimeout())
 	return errors.Join(runErr, a.shutdown(started))
 }
 
@@ -204,13 +204,13 @@ func (a *App) shutdown(components []Component) error {
 	case <-grpcDone:
 	case <-ctx.Done():
 		if a.grpcServer != nil {
-			log.Printf("server: grpc graceful stop exceeded %s, forcing stop", a.shutdownTimeout())
+			log.Printf("stateflux: [shutdown] grpc graceful stop exceeded %s; forcing stop", a.shutdownTimeout())
 			a.grpcServer.Stop()
 		}
 	}
 	if err := <-httpDone; err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
-			log.Printf("server: http shutdown exceeded %s, forcing close", a.shutdownTimeout())
+			log.Printf("stateflux: [shutdown] http shutdown exceeded %s; forcing close", a.shutdownTimeout())
 			if a.httpServer != nil {
 				_ = a.httpServer.Close()
 			}

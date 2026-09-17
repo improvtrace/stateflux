@@ -1,21 +1,22 @@
-package server
+package stateflux
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"sync"
 	"time"
 
-	"google.golang.org/grpc"
-
-	dispatchv1 "github.com/improvtrace/stateflux/api/dispatch/v1"
 	coherencev1 "github.com/improvtrace/stateflux/api/stateflux/coherence/v1"
+	dispatchv1 "github.com/improvtrace/stateflux/api/stateflux/dispatch/v1"
 	forwardv1 "github.com/improvtrace/stateflux/api/stateflux/forward/v1"
 	taskv1 "github.com/improvtrace/stateflux/api/stateflux/task/v1"
 	workerv1 "github.com/improvtrace/stateflux/api/stateflux/worker/v1"
 	bizcoherence "github.com/improvtrace/stateflux/internal/biz/coherence"
 	bizdispatch "github.com/improvtrace/stateflux/internal/biz/dispatch"
+	"github.com/improvtrace/stateflux/internal/biz/forward"
 	biztask "github.com/improvtrace/stateflux/internal/biz/task"
 	bizworker "github.com/improvtrace/stateflux/internal/biz/worker"
 	"github.com/improvtrace/stateflux/internal/cluster"
@@ -25,19 +26,129 @@ import (
 	"github.com/improvtrace/stateflux/internal/domain/data"
 	"github.com/improvtrace/stateflux/internal/domain/repository"
 	"github.com/improvtrace/stateflux/internal/eventbus"
+	"github.com/improvtrace/stateflux/internal/eventbus/channel"
+	"github.com/improvtrace/stateflux/internal/eventbus/channel/mem"
+	redischan "github.com/improvtrace/stateflux/internal/eventbus/channel/redis"
 	"github.com/improvtrace/stateflux/internal/eventbus/channel/rpc"
-	"github.com/improvtrace/stateflux/internal/forward"
 	"github.com/improvtrace/stateflux/internal/obs"
 	"github.com/improvtrace/stateflux/internal/runtime/collector"
 	"github.com/improvtrace/stateflux/internal/runtime/reconcile"
 	"github.com/improvtrace/stateflux/internal/runtime/scheduler"
+	"github.com/improvtrace/stateflux/internal/server"
 	"github.com/improvtrace/stateflux/internal/task"
 	"github.com/improvtrace/stateflux/internal/task/codec"
 	"github.com/improvtrace/stateflux/internal/task/dispatch"
 	"github.com/improvtrace/stateflux/internal/task/factory"
 	"github.com/improvtrace/stateflux/internal/worker"
 	"github.com/redis/go-redis/v9"
+	"google.golang.org/grpc"
 )
+
+// 逻辑 channel 名（任务行 channel 列的取值域）：装配把名字映射到实现，换实现不改状态机。
+const (
+	// ChannelDefault 是默认异步队列（Redis list），对应 config.Dispatch.DefaultDelivery。
+	ChannelDefault = "default"
+	// ChannelSync 是同步 request/reply（unary RPC）。
+	ChannelSync = "sync"
+	// ChannelStream 是结果流/全双工（gRPC ResultStream）。
+	ChannelStream = "stream"
+)
+
+// provideDialer 提供共享 gRPC 连接池。
+func provideDialer() *rpc.Dialer { return rpc.NewDialer() }
+
+// provideClusterView 按 config.Cluster 构造集群视图客户端（§15.1#3）。
+func provideClusterView(cfg config.Config) (cluster.View, error) {
+	return cluster.New(cfg.Cluster)
+}
+
+// provideNodeID 返回本节点唯一 ID：节点信息运行时从集群视图获取（§2.1），
+// 取快照 Info.NodeID（集群服务端在 GetClusterInfo 响应中上报本节点身份）；
+// 视图未上报（首次快照为空等场景）时退化为内置单节点身份。
+func provideNodeID(cache *cluster.Cache) string {
+	if id := cache.Snapshot().NodeID; id != "" {
+		return id
+	}
+	return cluster.DefaultLocalNode.ID
+}
+
+// provideClusterCache 包装带快照的集群视图（热路径无网络 I/O）；
+// 刷新间隔取集群 DSN 的 interval 参数（默认 3s，0 = 只按需拉取）。
+func provideClusterCache(ctx context.Context, cfg config.Config, view cluster.View) (*cluster.Cache, func()) {
+	opts, err := config.ParseClusterDSN(cfg.Cluster.DSN)
+	if err != nil {
+		opts = config.ClusterOptions{Interval: config.DefaultClusterInterval}
+	}
+	cache := cluster.NewCache(ctx, view, opts.Interval)
+	return cache, boundedCleanup("cluster-cache", cfg.Server.ShutdownTimeout, func() { _ = cache.Close() })
+}
+
+// provideCacheView 构造任务异步执行视图（§15.1#9）：Redis 可用时走 Redis，否则退化为
+// 进程内实现并在装配日志中显式声明。
+func provideCacheView(cfg config.Config, d *data.Data) (cacheview.View, error) {
+	opts := cacheview.Options{
+		TaskTTL:   cfg.Dispatch.DedupeWindow,
+		DedupeTTL: cfg.Dispatch.DedupeWindow,
+		RouteTTL:  cfg.Coherence.RevisionTTL,
+	}
+	if d == nil || d.Redis() == nil {
+		return cacheview.NewMem(opts), nil
+	}
+	return cacheview.NewRedis(d.Redis(), opts)
+}
+
+// provideEventBus 注册全部逻辑 channel（§3.2）：异步为 Redis 形态，同步为 unary RPC，
+// 结果流为 gRPC stream；另提供内存 fake 以便单机冒烟与测试。
+func provideEventBus(cfg config.Config, d *data.Data, dialer *rpc.Dialer) (*eventbus.EventBus, error) {
+	if d == nil || d.Redis() == nil {
+		return nil, errors.New("server: redis client is required for eventbus channels")
+	}
+	timeout := cfg.Dispatch.Timeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	ropts := redischan.Options{BlockTimeout: 2 * time.Second}
+
+	list, err := redischan.NewList(d.Redis(), ropts)
+	if err != nil {
+		return nil, err
+	}
+	zset, err := redischan.NewZSet(d.Redis(), ropts)
+	if err != nil {
+		return nil, err
+	}
+	stream, err := redischan.NewStream(d.Redis(), ropts)
+	if err != nil {
+		return nil, err
+	}
+	pubsub, err := redischan.NewPubSub(d.Redis(), ropts)
+	if err != nil {
+		return nil, err
+	}
+
+	channels := map[string]channel.Channel{
+		ChannelDefault: list,
+		ChannelSync:    rpc.NewUnary(dialer, timeout),
+		ChannelStream:  rpc.NewStream(dialer, timeout),
+		"redis-list":   list,
+		"redis-zset":   zset,
+		"redis-stream": stream,
+		"redis-pubsub": pubsub,
+		"rpc-unary":    rpc.NewUnary(dialer, timeout),
+		"rpc-stream":   rpc.NewStream(dialer, timeout),
+		"memory":       mem.NewMemory(),
+	}
+	return eventbus.NewEventBus(channels)
+}
+
+// describeChannel 便于启动日志输出装配结果。
+func describeChannel(bus *eventbus.EventBus, name string) string {
+	ch, err := bus.Resolve(name)
+	if err != nil {
+		return fmt.Sprintf("%s=unregistered", name)
+	}
+	return fmt.Sprintf("%s=%s", name, ch.Kind())
+}
 
 // ---- 领域与基建 ----
 
@@ -50,8 +161,8 @@ func provideStore(d *data.Data, ids *domain.Snowflake) repository.Store {
 }
 
 // provideSnowflake 构造任务 ID 生成器（§3.1：客户端雪花）。
-func provideSnowflake(cfg config.Config) *domain.Snowflake {
-	return domain.NewSnowflake(cfg.Node.NodeID)
+func provideSnowflake(nodeID string) *domain.Snowflake {
+	return domain.NewSnowflake(nodeID)
 }
 
 // provideTaskRegistry 构造任务原型注册表并登记内置原型（§15.1#13）。
@@ -102,7 +213,7 @@ func provideResultPublisher(cfg config.Config, bus *eventbus.EventBus, cache *cl
 }
 
 // provideWorkerRuntime 构造执行运行时（§5.4）。
-func provideWorkerRuntime(cfg config.Config, bus *eventbus.EventBus, cdc *codec.Codec, handlers *worker.HandlerRegistry, publisher *biztask.ResultPublisher, view cacheview.View, metrics *obs.Metrics) *worker.Runtime {
+func provideWorkerRuntime(cfg config.Config, nodeID string, bus *eventbus.EventBus, cdc *codec.Codec, handlers *worker.HandlerRegistry, publisher *biztask.ResultPublisher, view cacheview.View, metrics *obs.Metrics) *worker.Runtime {
 	return worker.NewRuntime(worker.RuntimeOptions{
 		WAL:            provideWAL(cfg),
 		Bus:            bus,
@@ -111,7 +222,7 @@ func provideWorkerRuntime(cfg config.Config, bus *eventbus.EventBus, cdc *codec.
 		Queues:         cfg.Runtime.WorkerQueues,
 		QueueSource:    bizworker.NewQueueSource(view, cfg.Runtime.WorkerQueues),
 		QueueRefresh:   cfg.Coherence.SyncInterval,
-		NodeID:         cfg.Node.NodeID,
+		NodeID:         nodeID,
 		ResultSink:     publisher.Publish,
 		Metrics:        metrics,
 		ExecuteTimeout: cfg.Runtime.DispatchGrace,
@@ -135,40 +246,40 @@ func provideWAL(cfg config.Config) worker.WAL {
 // ---- 转发 ----
 
 // provideForwarder 构造节点间转发客户端（§15.1#6）。
-func provideForwarder(cfg config.Config, dialer *rpc.Dialer, cache *cluster.Cache) *forward.Forwarder {
-	return forward.NewForwarder(dialer, cache, cfg.Node.NodeID, cfg.Dispatch.MaxHops)
+func provideForwarder(cfg config.Config, nodeID string, dialer *rpc.Dialer, cache *cluster.Cache) *forward.Forwarder {
+	return forward.NewForwarder(dialer, cache, nodeID, cfg.Dispatch.MaxHops)
 }
 
 // provideForwardRegistry 构造转发方法注册表（DispatchService 在 App 装配时登记）。
 func provideForwardRegistry() *forward.Registry { return forward.NewRegistry() }
 
 // provideForwardServer 构造转发服务端（§15.1#6）。
-func provideForwardServer(cfg config.Config, reg *forward.Registry, fwd *forward.Forwarder) *forward.Server {
-	return forward.NewServer(reg, fwd, cfg.Node.NodeID, cfg.Dispatch.MaxHops)
+func provideForwardServer(cfg config.Config, nodeID string, reg *forward.Registry, fwd *forward.Forwarder) *forward.Server {
+	return forward.NewServer(reg, fwd, nodeID, cfg.Dispatch.MaxHops)
 }
 
 // ---- 分发 ----
 
 // provideDispatcher 构造调度侧分发器（§5.3）。
-func provideDispatcher(cfg config.Config, bus *eventbus.EventBus, cache *cluster.Cache, view cacheview.View, cdc *codec.Codec, metrics *obs.Metrics) *dispatch.Dispatcher {
+func provideDispatcher(cfg config.Config, nodeID string, bus *eventbus.EventBus, cache *cluster.Cache, view cacheview.View, cdc *codec.Codec, metrics *obs.Metrics) *dispatch.Dispatcher {
 	return dispatch.New(dispatch.Options{
 		Bus:     bus,
 		Nodes:   cache,
 		View:    view,
 		Codec:   cdc,
-		Self:    cfg.Node.NodeID,
+		Self:    nodeID,
 		Config:  cfg.Dispatch,
 		Metrics: metrics,
 	})
 }
 
 // provideDispatchServer 构造分发服务端（§15.1#5）。
-func provideDispatchServer(cfg config.Config, d *dispatch.Dispatcher, cache *cluster.Cache, fwd *forward.Forwarder, metrics *obs.Metrics) *bizdispatch.DispatchServer {
+func provideDispatchServer(cfg config.Config, nodeID string, d *dispatch.Dispatcher, cache *cluster.Cache, fwd *forward.Forwarder, metrics *obs.Metrics) *bizdispatch.DispatchServer {
 	return bizdispatch.NewDispatchServer(bizdispatch.DispatchServerOptions{
 		Dispatcher: d,
 		Nodes:      cache,
 		Forwarder:  fwd,
-		Self:       cfg.Node.NodeID,
+		Self:       nodeID,
 		Config:     cfg.Dispatch,
 		Metrics:    metrics,
 	})
@@ -185,11 +296,11 @@ func provideCoherenceServer(store *bizcoherence.CoherenceStore, view cacheview.V
 }
 
 // provideCoherenceSyncer 构造调度侧共识同步器：分配全部 WorkerQueues。
-func provideCoherenceSyncer(cfg config.Config, store *bizcoherence.CoherenceStore, cache *cluster.Cache, dialer *rpc.Dialer, metrics *obs.Metrics) *bizcoherence.CoherenceSyncer {
-	pusher := bizcoherence.NewCoherencePusher(dialer, cache, cfg.Cluster.Timeout)
+func provideCoherenceSyncer(cfg config.Config, nodeID string, store *bizcoherence.CoherenceStore, cache *cluster.Cache, dialer *rpc.Dialer, metrics *obs.Metrics) *bizcoherence.CoherenceSyncer {
+	pusher := bizcoherence.NewCoherencePusher(dialer, cache, cfg.Dispatch.Timeout)
 	return bizcoherence.NewCoherenceSyncer(bizcoherence.CoherenceSyncerOptions{
 		Store:     store,
-		Allocator: bizcoherence.Allocator{SchedulerNodeID: cfg.Node.NodeID},
+		Allocator: bizcoherence.Allocator{SchedulerNodeID: nodeID},
 		Pusher:    pusher,
 		Nodes:     cache,
 		Queues:    cfg.Runtime.WorkerQueues,
@@ -199,15 +310,15 @@ func provideCoherenceSyncer(cfg config.Config, store *bizcoherence.CoherenceStor
 }
 
 // provideCoherencePuller 构造执行侧共识拉取器（§15.1#4）。
-func provideCoherencePuller(cfg config.Config, store *bizcoherence.CoherenceStore, cache *cluster.Cache, dialer *rpc.Dialer, view cacheview.View, metrics *obs.Metrics) *bizcoherence.CoherencePuller {
+func provideCoherencePuller(cfg config.Config, nodeID string, store *bizcoherence.CoherenceStore, cache *cluster.Cache, dialer *rpc.Dialer, view cacheview.View, metrics *obs.Metrics) *bizcoherence.CoherencePuller {
 	return bizcoherence.NewCoherencePuller(bizcoherence.CoherencePullerOptions{
 		Store:    store,
 		View:     view,
 		Dialer:   dialer,
 		Nodes:    cache,
-		Self:     cfg.Node.NodeID,
+		Self:     nodeID,
 		Interval: cfg.Coherence.SyncInterval,
-		Timeout:  cfg.Cluster.Timeout,
+		Timeout:  cfg.Dispatch.Timeout,
 		Metrics:  metrics,
 	})
 }
@@ -270,12 +381,12 @@ func provideChannelProbe(d *data.Data) reconcile.ChannelProbe {
 // ---- 调度 ----
 
 // provideCycle 构造默认调度周期（§5.2/§5.3）。
-func provideCycle(cfg config.Config, store repository.Store, d *dispatch.Dispatcher, bus *eventbus.EventBus, metrics *obs.Metrics) *scheduler.LedgerCycle {
+func provideCycle(cfg config.Config, nodeID string, store repository.Store, d *dispatch.Dispatcher, bus *eventbus.EventBus, metrics *obs.Metrics) *scheduler.LedgerCycle {
 	return scheduler.NewCycle(scheduler.CycleOptions{
 		Ledger:       store,
 		Dispatcher:   d,
 		Bus:          bus,
-		NodeID:       cfg.Node.NodeID,
+		NodeID:       nodeID,
 		PromoteLimit: cfg.Runtime.ClaimBatch,
 		ClaimBatch:   cfg.Runtime.ClaimBatch,
 		Config:       cfg.Dispatch,
@@ -395,7 +506,7 @@ func newRunnerComponent(name string, run func(ctx context.Context) error) *runne
 	return &runnerComponent{name: name, run: run}
 }
 
-// Start 实现 Component：在后台 goroutine 运行。
+// Start 实现 server.Component：在后台 goroutine 运行。
 func (c *runnerComponent) Start(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -412,7 +523,7 @@ func (c *runnerComponent) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop 实现 Component。
+// Stop 实现 server.Component。
 func (c *runnerComponent) Stop() error {
 	c.mu.Lock()
 	cancel := c.cancel
@@ -434,6 +545,7 @@ func (c *runnerComponent) Stop() error {
 // 节点运行（§2.1）。
 func provideComponents(
 	cfg config.Config,
+	nodeID string,
 	cache *cluster.Cache,
 	bus *eventbus.EventBus,
 	writer workerComponent,
@@ -443,8 +555,8 @@ func provideComponents(
 	puller pullerComponent,
 	factories factoryComponent,
 	resultRunner collectorRunnerComponent,
-) []Component {
-	components := make([]Component, 0, 9)
+) []server.Component {
+	components := make([]server.Component, 0, 9)
 	// eventbus 最先启动、最后停止：待全部组件停稳后再关闭结果流等底层通道，
 	// 服务端 GracefulStop 才能立即排空长连接，而不是等满关机预算。
 	if bus != nil {
@@ -456,26 +568,28 @@ func provideComponents(
 	if puller.v != nil {
 		components = append(components, puller.v)
 	}
-	gate := func(name string, inner Component) Component {
+	// 各控制面组件按节点服务权限 gate（外置集群角色推导）：
+	// 归集 → NodePermissionCollect；调度 / 工厂 / 共识同步 / 对账 → NodePermissionSchedule。
+	gate := func(name string, permission cluster.NodePermission, inner server.Component) server.Component {
 		if inner == nil {
 			return nil
 		}
-		return newElectionGate(name, cache, cfg.Node.NodeID, inner, DefaultElectionPollInterval, nil)
+		return server.NewElectionGate(name, cache, nodeID, permission, inner, server.DefaultElectionPollInterval, nil)
 	}
 	if resultRunner.v != nil {
-		components = append(components, gate("collector", resultRunner.v))
+		components = append(components, gate("collector", cluster.NodePermissionCollect, resultRunner.v))
 	}
 	if syncer.v != nil {
-		components = append(components, gate("coherence", syncer.v))
+		components = append(components, gate("coherence", cluster.NodePermissionSchedule, syncer.v))
 	}
 	if factories.v != nil {
-		components = append(components, gate("factory", factories.v))
+		components = append(components, gate("factory", cluster.NodePermissionSchedule, factories.v))
 	}
 	if schedulers.v != nil {
-		components = append(components, gate("scheduler", newRunnerComponent("schedulers", schedulers.v.Run)))
+		components = append(components, gate("scheduler", cluster.NodePermissionSchedule, newRunnerComponent("schedulers", schedulers.v.Run)))
 	}
 	if reconciler.v != nil {
-		components = append(components, gate("reconcile", reconciler.v))
+		components = append(components, gate("reconcile", cluster.NodePermissionSchedule, reconciler.v))
 	}
 	return components
 }
@@ -484,10 +598,10 @@ func provideComponents(
 // channel 底层连接（结果流客户端等）。
 type eventBusComponent struct{ bus *eventbus.EventBus }
 
-// Start 实现 Component：eventbus 在装配期已就绪。
+// Start 实现 server.Component：eventbus 在装配期已就绪。
 func (eventBusComponent) Start(context.Context) error { return nil }
 
-// Stop 实现 Component：关闭全部 channel（幂等）。
+// Stop 实现 server.Component：关闭全部 channel（幂等）。
 func (c eventBusComponent) Stop() error {
 	if c.bus == nil {
 		return nil
@@ -495,15 +609,15 @@ func (c eventBusComponent) Stop() error {
 	return c.bus.Close()
 }
 
-// 以下具名包装类型用于让 wire 区分多个 Component 依赖。
+// 以下具名包装类型用于让 wire 区分多个 server.Component 依赖。
 type (
-	workerComponent          struct{ v Component }
+	workerComponent          struct{ v server.Component }
 	schedulerComponent       struct{ v *scheduler.Group }
-	reconcileComponent       struct{ v Component }
-	syncerComponent          struct{ v Component }
-	pullerComponent          struct{ v Component }
-	factoryComponent         struct{ v Component }
-	collectorRunnerComponent struct{ v Component }
+	reconcileComponent       struct{ v server.Component }
+	syncerComponent          struct{ v server.Component }
+	pullerComponent          struct{ v server.Component }
+	factoryComponent         struct{ v server.Component }
+	collectorRunnerComponent struct{ v server.Component }
 )
 
 func provideWorkerComponent(rt *worker.Runtime) workerComponent {
@@ -548,21 +662,27 @@ func provideApp(
 	cfg config.Config,
 	grpcServer *grpc.Server,
 	httpServer *http.Server,
-	components []Component,
+	components []server.Component,
 	forwardRegistry *forward.Registry,
 	dispatchServer *bizdispatch.DispatchServer,
-	health *Health,
-) (*App, error) {
+	health *server.Health,
+) (*server.App, error) {
 	if forwardRegistry != nil && dispatchServer != nil {
 		if err := forwardRegistry.Register(bizdispatch.DispatchMethod, dispatchServer.HandleForwarded); err != nil {
 			return nil, err
 		}
 	}
-	return NewApp(AppOptions{
+	return server.NewApp(server.AppOptions{
 		Config:     cfg,
 		GRPCServer: grpcServer,
 		HTTPServer: httpServer,
 		Components: components,
 		Health:     health,
 	}), nil
+}
+
+// NewServeDeps 按 stateflux 的 serve 子命令需要创建依赖 provider 实例：
+// 返回值经 NewServeCommand 注入子命令，命令层不感知装配细节。
+func NewServeDeps() ServeDeps {
+	return ServeDeps{AppFactory: newApplication}
 }

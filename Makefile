@@ -9,7 +9,8 @@ API_PROTO_FILES := $(shell find api -name '*.proto' 2>/dev/null | sort)
 API_INCLUDES := -I. $(if $(wildcard third_party),-Ithird_party)
 
 build:
-	$(GO) build -o stateflux ./cmd/stateflux
+	@mkdir -p bin
+	$(GO) build -o bin/stateflux ./cmd
 
 vet:
 	$(GO) vet ./...
@@ -32,7 +33,7 @@ endif
 
 # wire 依赖注入代码生成（§15.1#1）：需要 github.com/google/wire/cmd/wire 在 PATH 内。
 wire:
-	$(GO) tool github.com/google/wire/cmd/wire ./internal/server
+	$(GO) tool github.com/google/wire/cmd/wire ./cmd/stateflux
 
 # ent 代码生成（schema 位于 internal/domain/schema，输出至 internal/domain/data/ent；
 # 生成码不入库——.gitignore 已排除，克隆/拉取后需先执行本目标）

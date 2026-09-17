@@ -1,13 +1,15 @@
 // Package cluster 提供集群视图（ClusterView）外部接口、RPC 客户端与 static 单机
 // 实现（§2.1、§8、§15.1#3）。集群信息只读不治：选举由外部系统负责，stateflux 仅消费。
 //
-// 连接信息来自 config.Cluster（§15.1#3），支持 grpc / http / static 三种传输。
+// 连接信息来自 config.Cluster（§15.1#3），仅一个 DSN 字段：local://、http(s)://、grpc://，
+// 连接与调用参数（timeout / connect_timeout / interval）经 URL query 声明。
 // 本包只做「拉取 + 快照 + 选择」，不做任何调度决策之外的裁决：路由决策仍在调度侧
 // （§1.2.7），本包的选择辅助函数只是把 vpc/label/node/bucket 过滤与哈希分桶集中一处。
 package cluster
 
 import (
 	"context"
+	"fmt"
 	"hash/fnv"
 	"strings"
 	"sync"
@@ -15,26 +17,58 @@ import (
 	"time"
 
 	"github.com/improvtrace/stateflux/internal/config"
+
+	clusterv1 "github.com/improvtrace/stateflux/api/cluster/v1"
 )
 
-// Role 是节点角色（§2.1）：worker(executor) 与 biz 常驻，控制面随选举启停。
-type Role string
+// Role 是节点角色（外置集群的定义，§2.1/§15.1#3）：仅有 primary 与 standby。
+type Role = string
 
 const (
-	// RoleBiz 装载 task/v1 服务端业务（§15.1#2）。
-	RoleBiz Role = "biz"
-	// RoleExecutor 执行节点（worker 运行时）。
-	RoleExecutor Role = "executor"
-	// RoleScheduler 调度运行时（晋升/认领/分发）。
-	RoleScheduler Role = "scheduler"
-	// RoleCollector 结果归集运行时。
-	RoleCollector Role = "collector"
-	// RoleReconcile 对账运行时（R1–R4）。
-	RoleReconcile Role = "reconcile"
+	// RolePrimary 主节点：具有数据库读写能力。
+	RolePrimary Role = "primary"
+	// RoleStandby 备节点：具备数据库读权限。
+	RoleStandby Role = "standby"
 )
 
-// Node 是集群视图中的一个节点（§15.1#3）：node_id + vpc + label 是拉取的核心三要素，
-// address/roles/capabilities 用于通信与路由。
+// NodePermission 是节点服务权限（stateflux 侧定义，随外置集群节点信息下发）：
+// 声明本节点启用哪些服务模块。
+type NodePermission string
+
+const (
+	// NodePermissionOperation 业务操作：节点启用执行侧 RPC（api/stateflux/worker）。
+	NodePermissionOperation NodePermission = "operation"
+	// NodePermissionExecute 任务执行：节点启用通用执行操作（api/stateflux/task）。
+	// 不变量：所有节点都必须启用该权限。
+	NodePermissionExecute NodePermission = "execute"
+	// NodePermissionSchedule 调度能力：节点启用调度能力（晋升/认领/分发）。
+	NodePermissionSchedule NodePermission = "schedule"
+	// NodePermissionCollect 归集能力：节点启用归集模块，归集结果。
+	NodePermissionCollect NodePermission = "collect"
+)
+
+// permissionsOf 推导节点服务权限：primary（库读写）具备全部权限；standby（库只读）
+// 仅保留业务操作与任务执行——调度与归集需写库，不授予只读节点。
+// 不变量：无论来源如何， NodePermissionExecute 恒在。
+func permissionsOf(roles []string) []NodePermission {
+	primary := false
+	for _, r := range roles {
+		if Role(r) == RolePrimary {
+			primary = true
+			break
+		}
+	}
+	var perms []NodePermission
+	if primary {
+		perms = []NodePermission{NodePermissionOperation, NodePermissionExecute, NodePermissionSchedule, NodePermissionCollect}
+	} else {
+		perms = []NodePermission{NodePermissionOperation, NodePermissionExecute}
+	}
+	return perms
+}
+
+// Node 是集群视图中的一个节点（§15.1#3）：node_id + vpc + labels 是拉取的核心三要素，
+// address 用于通信与路由；online/is_leader 描述节点实时状态。
 type Node struct {
 	// ID 节点唯一标识（集群内稳定）。
 	ID string
@@ -42,15 +76,19 @@ type Node struct {
 	Address string
 	// VPC 目标网络域（调度目标节点属性）。
 	VPC string
-	// Label 节点匹配标签（自由文本，框架不解释语义）。
-	Label string
-	// Roles 节点角色集合。
+	// Labels 节点匹配标签（自由文本，框架不解释语义）。
+	Labels []string
+	// Roles 节点角色（外置集群的定义）：仅 primary（库读写）/ standby（库只读）。
 	Roles []string
-	// Capabilities 能力标签集合（异步队列路由与能力匹配）。
-	Capabilities []string
+	// Permissions 节点服务权限：由角色推导，恒含 NodePermissionExecute（不变量）。
+	Permissions []NodePermission
+	// Online 节点是否在线。
+	Online bool
+	// IsLeader 节点是否为 leader 节点。
+	IsLeader bool
 }
 
-// HasRole 判断节点是否承担某角色。
+// HasRole 判断节点是否承担某角色（primary / standby）。
 func (n Node) HasRole(r Role) bool {
 	for _, role := range n.Roles {
 		if strings.EqualFold(role, string(r)) {
@@ -60,10 +98,20 @@ func (n Node) HasRole(r Role) bool {
 	return false
 }
 
-// HasCapability 判断节点是否声明某能力。
-func (n Node) HasCapability(name string) bool {
-	for _, c := range n.Capabilities {
-		if c == name {
+// HasPermission 判断节点是否启用某服务权限。
+func (n Node) HasPermission(p NodePermission) bool {
+	for _, p2 := range n.Permissions {
+		if p2 == p {
+			return true
+		}
+	}
+	return false
+}
+
+// HasLabel 判断节点是否携带某匹配标签。
+func (n Node) HasLabel(label string) bool {
+	for _, l := range n.Labels {
+		if l == label {
 			return true
 		}
 	}
@@ -74,7 +122,9 @@ func (n Node) HasCapability(name string) bool {
 type Info struct {
 	// Nodes 当前全部节点。
 	Nodes []Node
-	// SchedulerNodeID 当前调度节点 ID；空表示集群暂无调度节点（§2.1）。
+	// NodeID 当前节点 ID（集群视图上报的本实例身份；视图未提供时为空）。
+	NodeID string
+	// SchedulerNodeID 当前 leader 节点 ID；空表示集群暂无 leader（§2.1）。
 	SchedulerNodeID string
 }
 
@@ -110,7 +160,7 @@ func Select(nodes []Node, nodeID, vpc, label string, bucket int) (Node, bool) {
 		if vpc != "" && n.VPC != vpc {
 			continue
 		}
-		if label != "" && n.Label != label {
+		if label != "" && !n.HasLabel(label) {
 			continue
 		}
 		candidates = append(candidates, n)
@@ -151,18 +201,24 @@ func BucketOf(key string) int {
 	return int(h.Sum32() % 256)
 }
 
-// New 按 config.Cluster.Transport 构造视图客户端（§15.1#3）。
-func New(cfg config.Cluster, local config.Node) (View, error) {
-	switch cfg.Transport {
-	case config.ClusterHTTP:
-		return NewHTTPView(cfg)
-	case config.ClusterStatic, "":
-		return NewStaticView(cfg, local), nil
-	case config.ClusterGRPC:
-		return NewGRPCView(cfg)
+// New 按 config.Cluster 的 DSN 构造视图客户端（§15.1#3）：
+// grpc:// 走 gRPC，http(s):// 走 HTTP(S)/JSON，local://（单节点部署，空 DSN 同）走本地静态视图。
+// 连接与调用参数（timeout / connect_timeout / interval）由 ParseClusterDSN 统一解析。
+func New(cfg config.Cluster) (View, error) {
+	opts, err := config.ParseClusterDSN(cfg.DSN)
+	if err != nil {
+		return nil, err
+	}
+	switch opts.Scheme {
+	case config.ClusterSchemeHTTP, config.ClusterSchemeHTTPS:
+		return NewHTTPView(opts)
+	case config.ClusterSchemeLocal:
+		return NewStaticView(opts), nil
+	case config.ClusterSchemeGRPC:
+		return NewGRPCView(opts)
 	default:
-		// 未知传输按 static 处理会掩盖配置错误，显式报错更安全。
-		return nil, errUnknownTransport(string(cfg.Transport))
+		// 未知模式按 static 处理会掩盖配置错误，显式报错更安全。
+		return nil, errUnknownScheme(string(opts.Scheme))
 	}
 }
 
@@ -276,4 +332,48 @@ func (a *atomicInfo) load() Info {
 		return i
 	}
 	return Info{}
+}
+
+// ---- proto ↔ 领域转换 ----
+
+// fromProto 把外部集群视图的 NodeInfo 转为领域节点（§15.1#3）。
+func fromProto(n *clusterv1.NodeInfo) Node {
+	if n == nil {
+		return Node{}
+	}
+	return Node{
+		ID:          n.GetNodeId(),
+		Address:     n.GetAddress(),
+		VPC:         n.GetVpc(),
+		Labels:      append([]string(nil), n.GetLabels()...),
+		Roles:       append([]string(nil), n.GetRole()...),
+		Permissions: permissionsOf(n.GetRole()),
+		Online:      n.GetOnline(),
+		IsLeader:    n.GetIsLeader(),
+	}
+}
+
+func infoFromProto(resp *clusterv1.ClusterInfoResponse) Info {
+	if resp == nil {
+		return Info{}
+	}
+	info := Info{NodeID: resp.GetNodeId()}
+	for _, n := range resp.GetNodes() {
+		node := fromProto(n)
+		if node.IsLeader && info.SchedulerNodeID == "" {
+			info.SchedulerNodeID = node.ID
+		}
+		info.Nodes = append(info.Nodes, node)
+	}
+	return info
+}
+
+// ---- 错误辅助 ----
+
+func errUnknownScheme(t string) error {
+	return fmt.Errorf("cluster: unknown dsn scheme %q (want grpc|http|local)", t)
+}
+
+func errNoEndpoint(transport string) error {
+	return fmt.Errorf("cluster: dsn scheme %s requires host (e.g. grpc://host:port)", transport)
 }

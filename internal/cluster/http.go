@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -19,37 +20,41 @@ import (
 // defaultClusterHTTPPath 是 HTTP 集群视图的规范路径（与 gRPC 方法同名，便于网关路由）。
 const defaultClusterHTTPPath = "/cluster.v1.ClusterService/GetClusterInfo"
 
-// httpView 经 HTTP/JSON 调用外部 ClusterService（§15.1#3）：适配网关式部署，
-// 请求体为空对象、响应体为 protojson 编码的 ClusterInfoResponse。
+// httpView 经 HTTP(S)/JSON 调用外部 ClusterService（§15.1#3）：适配网关式部署，
+// 对应 dsn：http(s)://host[:port][/path]?timeout=...。请求体为空对象、响应体为
+// protojson 编码的 ClusterInfoResponse；path 为空时使用规范路径。
+// 连接与调用参数：connect_timeout → TCP 拨号超时，timeout → 单次请求整体预算。
 type httpView struct {
-	endpoint string
-	path     string
-	client   *http.Client
-	timeout  time.Duration
+	url     string
+	client  *http.Client
+	timeout time.Duration
 }
 
-// NewHTTPView 构造 HTTP 集群视图客户端。
-func NewHTTPView(cfg config.Cluster) (View, error) {
-	if cfg.Endpoint == "" {
-		return nil, errNoEndpoint("http")
+// NewHTTPView 构造 HTTP(S) 集群视图客户端。
+func NewHTTPView(opts config.ClusterOptions) (View, error) {
+	if opts.Host == "" {
+		return nil, errNoEndpoint(string(opts.Scheme))
 	}
-	endpoint := strings.TrimRight(cfg.Endpoint, "/")
-	path := defaultClusterHTTPPath
-	if strings.Contains(endpoint, "/") {
-		// 允许 endpoint 直接带上自定义路径（如 http://gw/cluster/info）。
-		if idx := strings.Index(endpoint, "://"); idx >= 0 {
-			rest := endpoint[idx+3:]
-			if slash := strings.Index(rest, "/"); slash >= 0 {
-				path = rest[slash:]
-				endpoint = endpoint[:idx+3+slash]
-			}
-		}
+	path := "/"
+	if idx := strings.Index(opts.Host, "/"); idx >= 0 {
+		path = opts.Host[idx:]
+		opts.Host = opts.Host[:idx]
+	}
+	if path == "" || path == "/" {
+		path = defaultClusterHTTPPath
+	}
+	scheme := "http://"
+	if opts.Scheme == config.ClusterSchemeHTTPS {
+		scheme = "https://"
+	}
+	// connect_timeout 只约束连接建立；timeout 约束整次调用（含连接与响应读取）。
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{Timeout: opts.ConnectTimeout}).DialContext,
 	}
 	return &httpView{
-		endpoint: endpoint,
-		path:     path,
-		client:   &http.Client{Timeout: cfg.Timeout},
-		timeout:  cfg.Timeout,
+		url:     scheme + opts.Host + path,
+		client:  &http.Client{Timeout: opts.Timeout, Transport: transport},
+		timeout: opts.Timeout,
 	}, nil
 }
 
@@ -64,7 +69,7 @@ func (v *httpView) Get(ctx context.Context) (Info, error) {
 	if err != nil {
 		return Info{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, v.endpoint+v.path, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, v.url, bytes.NewReader(body))
 	if err != nil {
 		return Info{}, err
 	}

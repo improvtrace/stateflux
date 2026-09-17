@@ -22,7 +22,8 @@ Redis、RPC 或任何消息通道的持久性：PG 的四阶段账本、attempt 
   （tick / notify / coherence / manual）（§15.1#11）。
 - **编解码**：异步任务分发/消费采用 machinery 风格的「签名 + 消息体」codec
   （`internal/task/codec`，§15.1#13）。
-- **装配**：启动依赖 **google/wire** 注入（`internal/server/wire.go` + `wire_gen.go`，§15.1#1）。
+- **装配**：启动依赖 **google/wire** 注入（`cmd/stateflux/wire.go` + `wire_gen.go`，§15.1#1）。
+- **入口与配置**：进程入口 `cmd/main.go`（cobra）；配置经 **viper** 装载，优先级为 默认值 → 配置文件（`serve --config <file>`，支持 yaml/toml/json）→ `STATEFLUX_*` 环境变量 → 命令行 flag。
 
 ## 布局
 
@@ -41,7 +42,7 @@ internal/
 │   ├── task/              #   api/stateflux/task/v1：Execute/归集 + 工厂入队
 │   ├── worker/            #   api/stateflux/worker/v1：能力 RPC + 验密/上传/队列视图
 │   ├── coherence/         #   api/stateflux/coherence/v1：共识快照与调度↔执行同步
-│   └── dispatch/          #   api/dispatch/v1：对外分发与节点间转发
+│   └── dispatch/          #   api/stateflux/dispatch/v1：对外分发与节点间转发
 ├── cluster/               # ClusterView：grpc / http / static
 ├── forward/               # 节点间 RPC 转发（环路保护）
 ├── worker/                # 能力注册/管理 + 执行运行时（WAL）
@@ -51,6 +52,13 @@ internal/
 ├── domain/                # schema / repository / data / cacheview / migration
 ├── config/                # 配置与默认值
 └── obs/                   # OTel 指标/链路装配
+```
+
+## 启动
+
+```bash
+make build
+./bin/stateflux serve --config stateflux.yaml --cluster-dsn local:// --grpc-addr 127.0.0.1:9090
 ```
 
 ## 运行时开关（`STATEFLUX_*` 环境变量）

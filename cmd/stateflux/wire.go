@@ -2,10 +2,10 @@
 // +build wireinject
 
 // 本文件是 wire 注入声明（§15.1#1）：项目启动依赖 wire 生成装配代码。
-// 运行 `make wire`（等价 `wire ./internal/server`）生成 wire_gen.go。
+// 运行 `make wire`（等价 `wire ./cmd/stateflux`）生成 wire_gen.go。
 //
 //go:generate go tool github.com/google/wire/cmd/wire
-package server
+package stateflux
 
 import (
 	"context"
@@ -13,6 +13,7 @@ import (
 	"github.com/google/wire"
 
 	"github.com/improvtrace/stateflux/internal/config"
+	"github.com/improvtrace/stateflux/internal/server"
 )
 
 // ProviderSet 是全部装配提供者（§15.1#1）。
@@ -22,6 +23,7 @@ var ProviderSet = wire.NewSet(
 	provideDialer,
 	provideClusterView,
 	provideClusterCache,
+	provideNodeID,
 	provideEventBus,
 	provideCacheView,
 	dataOpen,
@@ -77,12 +79,13 @@ var ProviderSet = wire.NewSet(
 	provideCapabilityServer,
 	provideGRPCServer,
 	provideComponents,
-	NewHealth,
-	NewHTTPServer,
+	server.NewHealth,
+	server.NewHTTPServer,
 	provideApp,
 )
 
-// InitializeApplication 是 wire 生成的装配入口（§15.1#1）：cmd/stateflux 只调用它。
-func InitializeApplication(ctx context.Context, cfg config.Config) (*App, func(), error) {
+// newApplication 是 wire 的装配器（§15.1#1）：按配置装配出应用实例与释放函数，
+// 仅由 NewServeDeps 包装成 ServeDeps 注入 serve 子命令。
+func newApplication(ctx context.Context, cfg config.Config) (*server.App, func(), error) {
 	panic(wire.Build(ProviderSet))
 }

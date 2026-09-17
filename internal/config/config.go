@@ -1,139 +1,230 @@
 package config
 
 import (
-	"os"
+	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mitchellh/mapstructure"
+	"github.com/spf13/pflag"
+	"github.com/spf13/viper"
 )
 
 // Config 是服务总配置（§8、§15.1#3）：flag/env 解析后填充，缺省值由 Default 提供。
 type Config struct {
-	PG        PG
-	Redis     Redis
-	Cluster   Cluster
-	Node      Node
-	Server    Server
-	Runtime   Runtime
-	Dispatch  Dispatch
-	Coherence Coherence
-	Obs       Obs
+	PG        PG        `mapstructure:"pg"`
+	Redis     Redis     `mapstructure:"redis"`
+	Cluster   Cluster   `mapstructure:"cluster"`
+	Server    Server    `mapstructure:"server"`
+	Runtime   Runtime   `mapstructure:"runtime"`
+	Dispatch  Dispatch  `mapstructure:"dispatch"`
+	Coherence Coherence `mapstructure:"coherence"`
+	Obs       Obs       `mapstructure:"obs"`
 }
 
 // PG 是 PostgreSQL 连接配置（§3.1：任务账本唯一权威存储）。
 type PG struct {
 	// DSN 数据源名称，如 postgres://user:pass@host:5432/db?sslmode=disable。
-	DSN string
+	DSN string `mapstructure:"dsn"`
 	// MaxOpenConns 最大打开连接数。
-	MaxOpenConns int
+	MaxOpenConns int `mapstructure:"max_open_conns"`
 	// MaxIdleConns 最大空闲连接数。
-	MaxIdleConns int
+	MaxIdleConns int `mapstructure:"max_idle_conns"`
 	// ConnMaxLifetime 连接最长复用时间。
-	ConnMaxLifetime time.Duration
+	ConnMaxLifetime time.Duration `mapstructure:"conn_max_lifetime"`
 	// ConnMaxIdleTime 空闲连接最长保留时间。
-	ConnMaxIdleTime time.Duration
+	ConnMaxIdleTime time.Duration `mapstructure:"conn_max_idle_time"`
 	// SearchPath 是连接建立后固定的 search_path（默认 public）：避免「用户名与 schema 同名」
 	// 时 PostgreSQL 的 "$user" 隐式 schema 把表解析到错误位置（§3.1）。
-	SearchPath string
+	SearchPath string `mapstructure:"search_path"`
 }
 
 // Redis 是 Redis 连接配置（§3.2：仅作为 best-effort 通信实现，正确性不依赖 Redis）。
 type Redis struct {
 	// Addrs 节点地址列表：单个地址走单机客户端，多个地址走 cluster 客户端。
-	Addrs        []string
-	Password     string
-	DB           int
-	DialTimeout  time.Duration
-	ReadTimeout  time.Duration
-	WriteTimeout time.Duration
-	PoolSize     int
-	MinIdleConns int
+	Addrs        []string      `mapstructure:"addrs"`
+	Password     string        `mapstructure:"password"`
+	DB           int           `mapstructure:"db"`
+	DialTimeout  time.Duration `mapstructure:"dial_timeout"`
+	ReadTimeout  time.Duration `mapstructure:"read_timeout"`
+	WriteTimeout time.Duration `mapstructure:"write_timeout"`
+	PoolSize     int           `mapstructure:"pool_size"`
+	MinIdleConns int           `mapstructure:"min_idle_conns"`
 }
 
-// ClusterTransport 是集群视图客户端的传输形态（§15.1#3）：grpc / http / static。
-type ClusterTransport string
+// ClusterScheme 是集群视图 DSN 的模式（§15.1#3）：local / http / https / grpc。
+type ClusterScheme string
 
 const (
-	// ClusterGRPC 经 gRPC 调用外部 ClusterService。
-	ClusterGRPC ClusterTransport = "grpc"
-	// ClusterHTTP 经 HTTP/JSON 调用外部 ClusterService（网关式部署）。
-	ClusterHTTP ClusterTransport = "http"
-	// ClusterStatic 单机模式：节点列表与调度节点直接来自配置，不访问外部系统。
-	ClusterStatic ClusterTransport = "static"
+	// ClusterSchemeGRPC 经 gRPC 调用外部 ClusterService。
+	ClusterSchemeGRPC ClusterScheme = "grpc"
+	// ClusterSchemeHTTP 经 HTTP/JSON 调用外部 ClusterService（网关式部署，明文）。
+	ClusterSchemeHTTP ClusterScheme = "http"
+	// ClusterSchemeHTTPS 经 HTTPS/JSON 调用外部 ClusterService（网关式部署，TLS）。
+	ClusterSchemeHTTPS ClusterScheme = "https"
+	// ClusterSchemeLocal 单节点部署：节点清单与 leader 位置直接来自本进程配置，不访问外部系统。
+	ClusterSchemeLocal ClusterScheme = "local"
 )
 
-// Cluster 是外置集群视图的连接信息（§15.1#3），归入 Stateflux.Config.Cluster。
+// 集群 DSN 的默认参数（全部通过 URL query 覆盖）。
+const (
+	// DefaultClusterTimeout 单次拉取超时（query: timeout）。
+	DefaultClusterTimeout = 10 * time.Second
+	// DefaultClusterConnectTimeout 连接超时（query: connect_timeout）。
+	DefaultClusterConnectTimeout = 30 * time.Second
+	// DefaultClusterInterval 拉取间隔（query: interval）。
+	DefaultClusterInterval = 3 * time.Second
+)
+
+// Cluster 是集群视图的连接配置（§15.1#3），归入 Stateflux.Config.Cluster，仅保留 DSN：
+//
+//	grpc://host:port?timeout=10s&connect_timeout=30s&interval=3s
+//	http(s)://host[:port][/path]?timeout=10s&connect_timeout=30s&interval=3s
+//	local://localhost?node_id=n1&address=127.0.0.1:9090
+//
+// 声明的 DSN 参数：
+//   - timeout:         单次拉取超时，默认 10s；
+//   - connect_timeout: 连接超时，默认 30s；
+//   - interval:        拉取间隔，默认 3s（显式 0 表示只按需拉取）。
+//
+// 时长值支持 Go duration 语法（10s / 500ms / 0）或无单位秒数（如 timeout=5）。
+// local 表示单节点部署，其余 query 参数（node_id / address 等）按模式各自解释。
 type Cluster struct {
-	// Transport 选择客户端实现：grpc（默认）/ http / static。
-	Transport ClusterTransport
-	// Endpoint 外部选举/成员服务地址。grpc 为 host:port；http 为 base URL。
-	Endpoint string
-	// Timeout 单次拉取超时。
-	Timeout time.Duration
-	// PollInterval 周期拉取间隔；0 表示只按需拉取。
-	PollInterval time.Duration
-	// StaticNodes 单机/静态模式下的节点清单（仅 Transport == static 时使用）。
-	StaticNodes []Node
-	// StaticSchedulerNodeID 静态模式下的调度节点 ID；空表示本节点。
-	StaticSchedulerNodeID string
+	// DSN 集群视图数据源名称；空等价于 local://localhost。
+	DSN string `mapstructure:"dsn"`
 }
 
-// Node 是本进程的节点身份（§2.1、§15.1#3）：注册进集群视图的能力声明。
-type Node struct {
-	// NodeID 节点唯一 ID；空则由集群视图或地址补齐（static 模式必填）。
-	NodeID string
-	// Address 对外可达的 gRPC 地址（host:port）。
-	Address string
-	// VPC 节点所属网络域（调度目标节点属性）。
-	VPC string
-	// Label 节点匹配标签（自由文本，框架不解释语义）。
-	Label string
-	// Roles 本节点承担的角色：biz / executor / scheduler / collector / reconcile。
-	Roles []string
-	// Capabilities 能力标签（worker 能力名集合，供调度侧匹配）。
-	Capabilities []string
+// ClusterOptions 是 ParseClusterDSN 的解析结果：连接与调用参数的单一来源，
+// 由 cluster 视图客户端（grpc / http(s) / local）与缓存刷新循环共同消费。
+type ClusterOptions struct {
+	// Scheme 解析出的模式（local / http / https / grpc）。
+	Scheme ClusterScheme
+	// Host 目标地址（host[:port]，来自 DSN authority；local 模式忽略）。
+	Host string
+	// Timeout 单次拉取超时（每次 Get 调用的预算）。
+	Timeout time.Duration
+	// ConnectTimeout 连接建立超时（grpc 连接参数 / http 拨号超时）。
+	ConnectTimeout time.Duration
+	// Interval 周期拉取间隔（缓存后台刷新；0 表示只按需拉取）。
+	Interval time.Duration
+	// Params 全部 query 参数（key 统一小写）。
+	Params map[string]string
+}
+
+// Param 返回 query 参数值；不存在返回空串。
+func (o ClusterOptions) Param(key string) string { return o.Params[strings.ToLower(key)] }
+
+// ParseClusterDSN 把集群 DSN 解析为 ClusterOptions：模式来自 scheme，
+// 连接与调用参数来自 URL query（timeout / connect_timeout / interval）。
+func ParseClusterDSN(dsn string) (ClusterOptions, error) {
+	dsn = strings.TrimSpace(dsn)
+	if dsn == "" {
+		dsn = string(ClusterSchemeLocal) + "://localhost"
+	}
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return ClusterOptions{}, fmt.Errorf("config: parse cluster dsn %q: %w", dsn, err)
+	}
+	o := ClusterOptions{
+		Scheme:         ClusterScheme(strings.ToLower(u.Scheme)),
+		Timeout:        DefaultClusterTimeout,
+		ConnectTimeout: DefaultClusterConnectTimeout,
+		Interval:       DefaultClusterInterval,
+		Params:         make(map[string]string),
+	}
+	for k, vs := range u.Query() {
+		if len(vs) > 0 {
+			o.Params[strings.ToLower(k)] = vs[0]
+		}
+	}
+	for _, spec := range []struct {
+		key string
+		out *time.Duration
+	}{
+		{"timeout", &o.Timeout},
+		{"connect_timeout", &o.ConnectTimeout},
+		{"interval", &o.Interval},
+	} {
+		if err := durationParam(o.Params, spec.key, spec.out); err != nil {
+			return ClusterOptions{}, err
+		}
+	}
+	switch o.Scheme {
+	case ClusterSchemeGRPC, ClusterSchemeHTTP, ClusterSchemeHTTPS:
+		if u.Host == "" {
+			return ClusterOptions{}, fmt.Errorf("config: cluster dsn %q: scheme %s requires host", dsn, o.Scheme)
+		}
+		o.Host = u.Host
+	case ClusterSchemeLocal:
+		// 单节点部署：不强制 host；节点身份为内置默认值（见 cluster.DefaultLocalNode）。
+		o.Host = u.Host
+	default:
+		return ClusterOptions{}, fmt.Errorf("config: cluster dsn %q: unknown scheme %q (want local|http|https|grpc)", dsn, u.Scheme)
+	}
+	return o, nil
+}
+
+// durationParam 解析时长 query 参数：支持 Go duration 语法（10s / 500ms / 0）
+// 与无单位秒数（如 timeout=5 视为 5s）。
+func durationParam(params map[string]string, key string, out *time.Duration) error {
+	v, ok := params[key]
+	if !ok || v == "" {
+		return nil
+	}
+	if d, err := time.ParseDuration(v); err == nil {
+		*out = d
+		return nil
+	}
+	secs, err := strconv.ParseFloat(v, 64)
+	if err != nil || secs < 0 {
+		return fmt.Errorf("config: cluster dsn param %s=%q: invalid duration", key, v)
+	}
+	*out = time.Duration(secs * float64(time.Second))
+	return nil
 }
 
 // Server 是服务监听配置。
 type Server struct {
 	// GRPCAddr gRPC 监听地址（ExecutorService / DispatchService / CoherenceService /
 	// ForwardService / CapabilityService 共用）。
-	GRPCAddr string
+	GRPCAddr string `mapstructure:"grpc_addr"`
 	// HTTPAddr 健康检查与诊断 HTTP 监听地址。
-	HTTPAddr string
+	HTTPAddr string `mapstructure:"http_addr"`
 	// ShutdownTimeout 优雅退出等待上限。
-	ShutdownTimeout time.Duration
+	ShutdownTimeout time.Duration `mapstructure:"shutdown_timeout"`
 }
 
 // Runtime 是控制面运行时开关（§2.1、§15.1#11）。
 type Runtime struct {
 	// SchedulerSchedulers 调度运行时实例名列表：同一进程可承载多个触发器实例
 	// （tick / notify / coherence / manual），空则按内置默认启用 tick。
-	SchedulerTriggers []string
+	SchedulerTriggers []string `mapstructure:"scheduler_triggers"`
 	// EnableCollector 是否启用结果归集运行时。
-	EnableCollector bool
+	EnableCollector bool `mapstructure:"enable_collector"`
 	// EnableReconcile 是否启用 R1–R4 对账运行时。
-	EnableReconcile bool
+	EnableReconcile bool `mapstructure:"enable_reconcile"`
 	// ClaimBatch 单次认领批量（§10 默认 500）。
-	ClaimBatch int
+	ClaimBatch int `mapstructure:"claim_batch"`
 	// TickInterval 调度 tick（§10 默认 100ms）。
-	TickInterval time.Duration
+	TickInterval time.Duration `mapstructure:"tick_interval"`
 	// PromoteInterval 晋升 tick（§10 默认 200ms）。
-	PromoteInterval time.Duration
+	PromoteInterval time.Duration `mapstructure:"promote_interval"`
 	// ReconcileInterval R1 扫描间隔。
-	ReconcileInterval time.Duration
+	ReconcileInterval time.Duration `mapstructure:"reconcile_interval"`
 	// DispatchGrace 通道无结果前不重试的最小窗口（§10 默认 90s）。
-	DispatchGrace time.Duration
+	DispatchGrace time.Duration `mapstructure:"dispatch_grace"`
 	// WorkerQueues 是执行运行时订阅的逻辑队列集合（异步任务 channel 名，§5.3）。
-	WorkerQueues []string
+	WorkerQueues []string `mapstructure:"worker_queues"`
 	// FactoryInterval 是内置示例工厂的生成周期（§5.6）；<=0 表示不注册工厂。
-	FactoryInterval time.Duration
+	FactoryInterval time.Duration `mapstructure:"factory_interval"`
 	// WALDir 是结果 WAL 目录（§5.4）；空表示使用进程内 WAL。
-	WALDir string
+	WALDir string `mapstructure:"wal_dir"`
 	// WALMaxEntries 是 WAL 高水位条目数（§10 默认 10k）。
-	WALMaxEntries int
+	WALMaxEntries int `mapstructure:"wal_max_entries"`
 	// WALMaxBytes 是 WAL 高水位字节数（§10 默认 256MB）。
-	WALMaxBytes int64
+	WALMaxBytes int64 `mapstructure:"wal_max_bytes"`
 }
 
 // Delivery 是分发投递形态（§15.1#5）。
@@ -161,42 +252,42 @@ const (
 // Dispatch 是分发器配置（§15.1#5）。
 type Dispatch struct {
 	// DefaultSemantics 未显式指定时的投递语义。
-	DefaultSemantics Semantics
+	DefaultSemantics Semantics `mapstructure:"default_semantics"`
 	// DefaultDelivery 未显式指定时的投递形态。
-	DefaultDelivery Delivery
+	DefaultDelivery Delivery `mapstructure:"default_delivery"`
 	// Forward 是否允许节点间转发。
-	Forward bool
+	Forward bool `mapstructure:"forward"`
 	// MaxHops 转发跳数上限（环路保护）。
-	MaxHops int
+	MaxHops int `mapstructure:"max_hops"`
 	// Timeout 单次分发超时。
-	Timeout time.Duration
+	Timeout time.Duration `mapstructure:"timeout"`
 	// DedupeWindow exactly_once 的入口去重窗口。
-	DedupeWindow time.Duration
+	DedupeWindow time.Duration `mapstructure:"dedupe_window"`
 	// ResultChannel 是结果归集通道的逻辑名（§5.5）：默认 stream（worker→调度节点 gRPC
 	// ResultStream），可替换为 redis-pubsub / redis-list 等。
-	ResultChannel string
+	ResultChannel string `mapstructure:"result_channel"`
 }
 
 // Coherence 是共识信息同步配置（§15.1#4）。
 type Coherence struct {
 	// QueuePrefix 异步队列名前缀（队列↔节点映射的键空间）。
-	QueuePrefix string
+	QueuePrefix string `mapstructure:"queue_prefix"`
 	// SyncInterval 执行节点周期拉取共识信息的间隔。
-	SyncInterval time.Duration
+	SyncInterval time.Duration `mapstructure:"sync_interval"`
 	// RevisionTTL 共识 revision 在 redis 的保留时长。
-	RevisionTTL time.Duration
+	RevisionTTL time.Duration `mapstructure:"revision_ttl"`
 }
 
 // Obs 是观测装配参数（§6.4、§15.1#10）。
 type Obs struct {
 	// Enabled 是否启用 OTel 导出；false 时 instruments 为 no-op。
-	Enabled bool
+	Enabled bool `mapstructure:"enabled"`
 	// ServiceName 资源服务名。
-	ServiceName string
+	ServiceName string `mapstructure:"service_name"`
 	// OTLPEndpoint OTLP 导出地址（grpc）。
-	OTLPEndpoint string
+	OTLPEndpoint string `mapstructure:"otlp_endpoint"`
 	// Insecure 是否使用明文 OTLP 连接。
-	Insecure bool
+	Insecure bool `mapstructure:"insecure"`
 }
 
 // Default 返回全量默认配置。
@@ -216,22 +307,7 @@ func Default() Config {
 			ReadTimeout:  3 * time.Second,
 			WriteTimeout: 3 * time.Second,
 		},
-		Cluster: Cluster{
-			Transport:    ClusterStatic,
-			Timeout:      3 * time.Second,
-			PollInterval: 10 * time.Second,
-			StaticNodes: []Node{{
-				NodeID:       "local",
-				Address:      "127.0.0.1:9090",
-				Roles:        []string{"biz", "executor", "scheduler", "collector"},
-				Capabilities: []string{},
-			}},
-		},
-		Node: Node{
-			NodeID:  "local",
-			Address: "127.0.0.1:9090",
-			Roles:   []string{"biz", "executor", "scheduler", "collector"},
-		},
+		Cluster: Cluster{DSN: "local://localhost"},
 		Server: Server{
 			GRPCAddr:        "127.0.0.1:9090",
 			HTTPAddr:        "127.0.0.1:9091",
@@ -274,125 +350,107 @@ func Default() Config {
 	}
 }
 
+// NewViper 返回已装配默认值、环境变量（STATEFLUX_ 前缀，. → _）与可选配置文件的
+// viper 实例：Default → 配置文件 → 环境变量 →（由调用方绑定）命令行 flag，后者优先。
+// configFile 为空时跳过文件读取，仅用默认值与环境变量。
+func NewViper(configFile string) (*viper.Viper, error) {
+	v := viper.New()
+	setDefaults(v)
+	v.SetEnvPrefix("STATEFLUX")
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	v.AutomaticEnv()
+	if configFile != "" {
+		v.SetConfigFile(configFile)
+		if err := v.ReadInConfig(); err != nil {
+			return nil, fmt.Errorf("config: read %s: %w", configFile, err)
+		}
+	}
+	return v, nil
+}
+
+// BindFlags 把命令行 flag 绑定到 viper key：flag 显式给出时覆盖文件与环境变量。
+// 绑定关系集中在此维护，避免各命令散落拼写。
+func BindFlags(v *viper.Viper, fs *pflag.FlagSet) {
+	bind := func(key, name string) { _ = v.BindPFlag(key, fs.Lookup(name)) }
+	bind("pg.dsn", "pg-dsn")
+	bind("redis.addrs", "redis-addrs")
+	bind("cluster.dsn", "cluster-dsn")
+	bind("server.grpc_addr", "grpc-addr")
+	bind("server.http_addr", "http-addr")
+}
+
+// FromViper 把 viper 实例解码为 Config：AllSettings 已合并默认值、配置文件、
+// 环境变量与绑定的命令行 flag（优先级从低到高）。
+func FromViper(v *viper.Viper) (Config, error) {
+	var cfg Config
+	dec, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
+		Result:           &cfg,
+		TagName:          "mapstructure",
+		WeaklyTypedInput: true,
+		DecodeHook: mapstructure.ComposeDecodeHookFunc(
+			mapstructure.StringToTimeDurationHookFunc(),
+			mapstructure.StringToSliceHookFunc(",")),
+	})
+	if err != nil {
+		return Default(), err
+	}
+	if err := dec.Decode(v.AllSettings()); err != nil {
+		return Default(), fmt.Errorf("config: decode: %w", err)
+	}
+	return cfg, nil
+}
+
 // FromEnv 在 Default 之上应用环境变量覆盖（STATEFLUX_ 前缀）；
-// 解析失败的项静默保留默认值，由启动后的健康检查暴露问题。
+// 保留给纯环境变量部署形态与测试使用。
 func FromEnv() Config {
-	cfg := Default()
-
-	envString(func(key, val string) { cfg.PG.DSN = val }, "STATEFLUX_PG_DSN")
-	envInt(func(key string, val int) { cfg.PG.MaxOpenConns = val }, "STATEFLUX_PG_MAX_OPEN_CONNS")
-	envInt(func(key string, val int) { cfg.PG.MaxIdleConns = val }, "STATEFLUX_PG_MAX_IDLE_CONNS")
-	envDuration(func(key string, val time.Duration) { cfg.PG.ConnMaxLifetime = val }, "STATEFLUX_PG_CONN_MAX_LIFETIME")
-	envDuration(func(key string, val time.Duration) { cfg.PG.ConnMaxIdleTime = val }, "STATEFLUX_PG_CONN_MAX_IDLE_TIME")
-	envString(func(key, val string) { cfg.PG.SearchPath = val }, "STATEFLUX_PG_SEARCH_PATH")
-
-	envStrings(func(key string, val []string) { cfg.Redis.Addrs = val }, "STATEFLUX_REDIS_ADDRS")
-	envString(func(key, val string) { cfg.Redis.Password = val }, "STATEFLUX_REDIS_PASSWORD")
-	envInt(func(key string, val int) { cfg.Redis.DB = val }, "STATEFLUX_REDIS_DB")
-	envDuration(func(key string, val time.Duration) { cfg.Redis.DialTimeout = val }, "STATEFLUX_REDIS_DIAL_TIMEOUT")
-	envDuration(func(key string, val time.Duration) { cfg.Redis.ReadTimeout = val }, "STATEFLUX_REDIS_READ_TIMEOUT")
-	envDuration(func(key string, val time.Duration) { cfg.Redis.WriteTimeout = val }, "STATEFLUX_REDIS_WRITE_TIMEOUT")
-	envInt(func(key string, val int) { cfg.Redis.PoolSize = val }, "STATEFLUX_REDIS_POOL_SIZE")
-	envInt(func(key string, val int) { cfg.Redis.MinIdleConns = val }, "STATEFLUX_REDIS_MIN_IDLE_CONNS")
-
-	envString(func(key, val string) { cfg.Cluster.Transport = ClusterTransport(val) }, "STATEFLUX_CLUSTER_TRANSPORT")
-	envString(func(key, val string) { cfg.Cluster.Endpoint = val }, "STATEFLUX_CLUSTER_ENDPOINT")
-	envDuration(func(key string, val time.Duration) { cfg.Cluster.Timeout = val }, "STATEFLUX_CLUSTER_TIMEOUT")
-	envDuration(func(key string, val time.Duration) { cfg.Cluster.PollInterval = val }, "STATEFLUX_CLUSTER_POLL_INTERVAL")
-	envString(func(key, val string) { cfg.Cluster.StaticSchedulerNodeID = val }, "STATEFLUX_CLUSTER_STATIC_SCHEDULER_NODE_ID")
-
-	envString(func(key, val string) { cfg.Node.NodeID = val }, "STATEFLUX_NODE_ID")
-	envString(func(key, val string) { cfg.Node.Address = val }, "STATEFLUX_NODE_ADDRESS")
-	envString(func(key, val string) { cfg.Node.VPC = val }, "STATEFLUX_NODE_VPC")
-	envString(func(key, val string) { cfg.Node.Label = val }, "STATEFLUX_NODE_LABEL")
-	envStrings(func(key string, val []string) { cfg.Node.Roles = val }, "STATEFLUX_NODE_ROLES")
-	envStrings(func(key string, val []string) { cfg.Node.Capabilities = val }, "STATEFLUX_NODE_CAPABILITIES")
-
-	envString(func(key, val string) { cfg.Server.GRPCAddr = val }, "STATEFLUX_SERVER_GRPC_ADDR")
-	envString(func(key, val string) { cfg.Server.HTTPAddr = val }, "STATEFLUX_SERVER_HTTP_ADDR")
-	envDuration(func(key string, val time.Duration) { cfg.Server.ShutdownTimeout = val }, "STATEFLUX_SERVER_SHUTDOWN_TIMEOUT")
-
-	envStrings(func(key string, val []string) { cfg.Runtime.SchedulerTriggers = val }, "STATEFLUX_RUNTIME_SCHEDULER_TRIGGERS")
-	envBool(func(key string, val bool) { cfg.Runtime.EnableCollector = val }, "STATEFLUX_RUNTIME_ENABLE_COLLECTOR")
-	envBool(func(key string, val bool) { cfg.Runtime.EnableReconcile = val }, "STATEFLUX_RUNTIME_ENABLE_RECONCILE")
-	envInt(func(key string, val int) { cfg.Runtime.ClaimBatch = val }, "STATEFLUX_RUNTIME_CLAIM_BATCH")
-	envDuration(func(key string, val time.Duration) { cfg.Runtime.TickInterval = val }, "STATEFLUX_RUNTIME_TICK_INTERVAL")
-	envDuration(func(key string, val time.Duration) { cfg.Runtime.PromoteInterval = val }, "STATEFLUX_RUNTIME_PROMOTE_INTERVAL")
-	envDuration(func(key string, val time.Duration) { cfg.Runtime.ReconcileInterval = val }, "STATEFLUX_RUNTIME_RECONCILE_INTERVAL")
-	envDuration(func(key string, val time.Duration) { cfg.Runtime.DispatchGrace = val }, "STATEFLUX_RUNTIME_DISPATCH_GRACE")
-	envStrings(func(key string, val []string) { cfg.Runtime.WorkerQueues = val }, "STATEFLUX_RUNTIME_WORKER_QUEUES")
-	envDuration(func(key string, val time.Duration) { cfg.Runtime.FactoryInterval = val }, "STATEFLUX_RUNTIME_FACTORY_INTERVAL")
-	envString(func(key, val string) { cfg.Runtime.WALDir = val }, "STATEFLUX_RUNTIME_WAL_DIR")
-	envInt(func(key string, val int) { cfg.Runtime.WALMaxEntries = val }, "STATEFLUX_RUNTIME_WAL_MAX_ENTRIES")
-	envInt64(func(key string, val int64) { cfg.Runtime.WALMaxBytes = val }, "STATEFLUX_RUNTIME_WAL_MAX_BYTES")
-
-	envString(func(key, val string) { cfg.Dispatch.DefaultSemantics = Semantics(val) }, "STATEFLUX_DISPATCH_DEFAULT_SEMANTICS")
-	envString(func(key, val string) { cfg.Dispatch.DefaultDelivery = Delivery(val) }, "STATEFLUX_DISPATCH_DEFAULT_DELIVERY")
-	envBool(func(key string, val bool) { cfg.Dispatch.Forward = val }, "STATEFLUX_DISPATCH_FORWARD")
-	envInt(func(key string, val int) { cfg.Dispatch.MaxHops = val }, "STATEFLUX_DISPATCH_MAX_HOPS")
-	envDuration(func(key string, val time.Duration) { cfg.Dispatch.Timeout = val }, "STATEFLUX_DISPATCH_TIMEOUT")
-	envDuration(func(key string, val time.Duration) { cfg.Dispatch.DedupeWindow = val }, "STATEFLUX_DISPATCH_DEDUPE_WINDOW")
-	envString(func(key, val string) { cfg.Dispatch.ResultChannel = val }, "STATEFLUX_DISPATCH_RESULT_CHANNEL")
-
-	envString(func(key, val string) { cfg.Coherence.QueuePrefix = val }, "STATEFLUX_COHERENCE_QUEUE_PREFIX")
-	envDuration(func(key string, val time.Duration) { cfg.Coherence.SyncInterval = val }, "STATEFLUX_COHERENCE_SYNC_INTERVAL")
-	envDuration(func(key string, val time.Duration) { cfg.Coherence.RevisionTTL = val }, "STATEFLUX_COHERENCE_REVISION_TTL")
-
-	envBool(func(key string, val bool) { cfg.Obs.Enabled = val }, "STATEFLUX_OBS_ENABLED")
-	envString(func(key, val string) { cfg.Obs.ServiceName = val }, "STATEFLUX_OBS_SERVICE_NAME")
-	envString(func(key, val string) { cfg.Obs.OTLPEndpoint = val }, "STATEFLUX_OBS_OTLP_ENDPOINT")
-	envBool(func(key string, val bool) { cfg.Obs.Insecure = val }, "STATEFLUX_OBS_INSECURE")
-
+	v, err := NewViper("")
+	if err != nil {
+		return Default()
+	}
+	cfg, err := FromViper(v)
+	if err != nil {
+		return Default()
+	}
 	return cfg
 }
 
-func envString(set func(key, val string), key string) {
-	if v, ok := os.LookupEnv(key); ok && v != "" {
-		set(key, v)
+// setDefaults 把 Default() 展开成小写点分 key 逐项注册：每个 key 都有默认值后，
+// viper 的 AutomaticEnv 才能在 Unmarshal 时按 key 命中环境变量。
+func setDefaults(v *viper.Viper) {
+	raw, err := toMap(Default())
+	if err != nil {
+		return
 	}
+	flatten("", raw, v)
 }
 
-func envInt(set func(key string, val int), key string) {
-	if v, ok := os.LookupEnv(key); ok {
-		if n, err := strconv.Atoi(v); err == nil {
-			set(key, n)
-		}
+// toMap 按 mapstructure tag 把 Config 编码为嵌套 map。
+func toMap(cfg Config) (map[string]any, error) {
+	var raw map[string]any
+	dec, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
+		Result:  &raw,
+		TagName: "mapstructure",
+	})
+	if err != nil {
+		return nil, err
 	}
+	if err := dec.Decode(cfg); err != nil {
+		return nil, err
+	}
+	return raw, nil
 }
 
-func envInt64(set func(key string, val int64), key string) {
-	if v, ok := os.LookupEnv(key); ok {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
-			set(key, n)
+// flatten 把嵌套 map 展开为点分 key 注册进 viper。
+func flatten(prefix string, m map[string]any, v *viper.Viper) {
+	for k, val := range m {
+		key := strings.ToLower(k)
+		if prefix != "" {
+			key = prefix + "." + key
 		}
-	}
-}
-
-func envBool(set func(key string, val bool), key string) {
-	if v, ok := os.LookupEnv(key); ok && v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			set(key, b)
+		if nested, ok := val.(map[string]any); ok {
+			flatten(key, nested, v)
+			continue
 		}
-	}
-}
-
-func envStrings(set func(key string, val []string), key string) {
-	if v, ok := os.LookupEnv(key); ok && v != "" {
-		items := strings.Split(v, ",")
-		out := make([]string, 0, len(items))
-		for _, item := range items {
-			if s := strings.TrimSpace(item); s != "" {
-				out = append(out, s)
-			}
-		}
-		set(key, out)
-	}
-}
-
-func envDuration(set func(key string, val time.Duration), key string) {
-	if v, ok := os.LookupEnv(key); ok {
-		if d, err := time.ParseDuration(v); err == nil {
-			set(key, d)
-		}
+		v.SetDefault(key, val)
 	}
 }

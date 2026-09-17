@@ -12,7 +12,7 @@
 | 2 | `api/` 下契约的具体实现放在 `internal/biz` | biz 实现全部生成的服务端接口（task/worker/dispatch/coherence/forward），并注册能力与工厂 |
 | 3 | `api/cluster` 定义外置节点信息：`node_id` / `vpc` / `label`；客户端封装在 `internal/cluster`，支持 **http / grpc**；连接信息在 `internal/config.Config.Cluster` | `api/cluster/v1`（NodeInfo 增 `vpc`/`label`）、`internal/cluster`（`View` + grpc/http/static 实现）、`config.Cluster` |
 | 4 | `api/stateflux/coherence` 同步集群共识信息（如「异步 redis 队列 ↔ 节点」映射）；由调度节点分配、经 RPC 通知执行节点 | `api/stateflux/coherence/v1`（`CoherenceService`：`GetCoherence`/`Notify`）、调度侧分配器 + 执行侧应用器 |
-| 5 | `api/dispatch` 向外提供任务分发接口；支持 `at_least_once` / `at_most_once` / `exactly_once` 三种语义；支持节点间转发；支持异步 redis queue 与同步 rpc 两种投递 | `api/dispatch/v1`（顶层，对外）、`internal/task/dispatch`（调度侧编排）、biz 的 `DispatchService` 服务端 |
+| 5 | `api/stateflux/dispatch` 向外提供任务分发接口；支持 `at_least_once` / `at_most_once` / `exactly_once` 三种语义；支持节点间转发；支持异步 redis queue 与同步 rpc 两种投递 | `api/stateflux/dispatch/v1`（顶层，对外）、`internal/task/dispatch`（调度侧编排）、biz 的 `DispatchService` 服务端 |
 | 6 | 新增 `api/stateflux/forward` + `internal/forward`，执行节点间 RPC 转发 | `api/stateflux/forward/v1`、`internal/forward` |
 | 7 | `api/stateflux/worker` 定义用户自定义 RPC（执行节点能力，如主机验密、文件上传）；实现放 `internal/biz` | `api/stateflux/worker/v1`、biz 的能力实现 |
 | 8 | `internal/worker` **不实现** worker RPC，只组织/注册/管理能力 | `internal/worker`（`Capability` + `Registry` + `Manager` + 执行运行时），rpc 适配在 biz |
@@ -52,7 +52,7 @@ internal/
 
 ## 15.3 关键判定
 
-1. **`api/dispatch` 为顶层对外契约**：§15.1 第 5 条字面为 `api/dispatch`（与第 3 条 `api/cluster`
+1. **`api/stateflux/dispatch` 为顶层对外契约**：§15.1 第 5 条字面为 `api/stateflux/dispatch`（与第 3 条 `api/cluster`
    同级），而第 4/6/7 条均为 `api/stateflux/*`；据此 dispatch 落在顶层，原
    `api/stateflux/dispatch/v1` 占位随之退役（其调度↔执行语义由 `api/stateflux/task/v1` 承担）。
 2. **`exactly_once` 是投递语义而非正确性承诺**：与 §13「不承诺 exactly-once」一致——
@@ -71,7 +71,7 @@ internal/
 | 2 实现落 biz | ✅ | `internal/biz` 实现 executor/capability/dispatch/coherence 服务端 + factory/handler/能力 |
 | 3 cluster http/grpc | ✅ | `api/cluster/v1`（vpc/label/roles/capabilities）、`internal/cluster`（grpc/http/static + Cache）、`config.Cluster` |
 | 4 coherence | ✅ | `api/stateflux/coherence/v1` + `biz.CoherenceStore/Allocator/Pusher/Syncer/Puller` |
-| 5 dispatch 语义/投递/转发 | ✅ | `api/dispatch/v1` + `biz.DispatchServer` + `task/dispatch.Dispatcher`（三种语义、两种投递、转发） |
+| 5 dispatch 语义/投递/转发 | ✅ | `api/stateflux/dispatch/v1` + `biz.DispatchServer` + `task/dispatch.Dispatcher`（三种语义、两种投递、转发） |
 | 6 forward | ✅ | `api/stateflux/forward/v1` + `internal/forward`（环路/TTL 保护） |
 | 7 worker 能力 | ✅ | `api/stateflux/worker/v1`（ListCapabilities/Invoke/VerifyPassword/UploadFile）+ biz SSH/SFTP 实现 |
 | 8 worker 组织能力 | ✅ | `internal/worker` 的 `Capability`/`Registry`/`HandlerRegistry`/`Runtime`/`WAL`；RPC 适配在 biz |

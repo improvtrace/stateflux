@@ -11,7 +11,7 @@ package dispatch.v1;
 
 import "api/stateflux/task/v1/task.proto";
 
-option go_package = "github.com/improvtrace/stateflux/api/dispatch/v1;dispatchv1";
+option go_package = "github.com/improvtrace/stateflux/api/stateflux/dispatch/v1;dispatchv1";
 
 // Semantics 是投递语义。
 enum Semantics {
