@@ -57,15 +57,7 @@ func (r *Runner) Start(ctx context.Context) error {
 	if r.channelName == "" {
 		return nil
 	}
-	ch, err := r.bus.Resolve(r.channelName)
-	if err != nil {
-		return err
-	}
-	subber, ok := ch.(channel.Subscriber)
-	if !ok {
-		return errors.New("runtime/collector: result channel does not support subscribe")
-	}
-	sub, err := subber.Subscribe(ctx, r.topic, r.handle)
+	sub, err := r.bus.SubscribeTopic(ctx, r.topic, r.handle, eventbus.WithChannel(r.channelName))
 	if err != nil {
 		return err
 	}

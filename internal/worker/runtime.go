@@ -190,15 +190,7 @@ func (r *Runtime) reconcileSubscriptions(ctx context.Context, want []string) {
 			// 高水位：暂停新订阅、继续结果发送（§10、§14.7）。
 			continue
 		}
-		ch, err := r.bus.Resolve(q)
-		if err != nil {
-			continue
-		}
-		subber, ok := ch.(channel.Subscriber)
-		if !ok {
-			continue
-		}
-		sub, err := subber.Subscribe(ctx, channel.Topic(q), r.onEnvelope)
+		sub, err := r.bus.SubscribeTopic(ctx, channel.Topic(q), r.onEnvelope, eventbus.WithChannel(q))
 		if err != nil {
 			continue
 		}

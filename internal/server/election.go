@@ -17,7 +17,7 @@ const DefaultElectionPollInterval = 2 * time.Second
 // 归属变化自然接管；短暂双主窗口由 R1 与 attempt 幂等收敛（§6.2，不做 PG fencing）。
 type electionGate struct {
 	name       string
-	cache      *cluster.Cache
+	cache      cluster.ClusterCacheView
 	self       string
 	permission cluster.NodePermission
 	inner      Component
@@ -33,7 +33,7 @@ type electionGate struct {
 // NewElectionGate 包装一个控制面组件；cache 为 nil 时退化为「始终运行」（静态单机）。
 // permission 为该组件要求的服务权限（cluster.NodePermission，空 = 不限制）：本节点必须
 // 当选 leader 且快照中自身节点启用该权限，inner 才会运行。
-func NewElectionGate(name string, cache *cluster.Cache, self string, permission cluster.NodePermission, inner Component, poll time.Duration, metrics *obs.Metrics) Component {
+func NewElectionGate(name string, cache cluster.ClusterCacheView, self string, permission cluster.NodePermission, inner Component, poll time.Duration, metrics *obs.Metrics) Component {
 	if poll <= 0 {
 		poll = DefaultElectionPollInterval
 	}

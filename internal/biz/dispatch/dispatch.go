@@ -27,7 +27,7 @@ type DispatchServer struct {
 	dispatchv1.UnimplementedDispatchServiceServer
 
 	dispatcher *taskdispatch.Dispatcher
-	nodes      *cluster.Cache
+	nodes      cluster.ClusterCacheView
 	forwarder  *forward.Forwarder
 	self       string
 	cfg        config.Dispatch
@@ -37,7 +37,7 @@ type DispatchServer struct {
 // DispatchServerOptions 是装配参数。
 type DispatchServerOptions struct {
 	Dispatcher *taskdispatch.Dispatcher
-	Nodes      *cluster.Cache
+	Nodes      cluster.ClusterCacheView
 	Forwarder  *forward.Forwarder
 	Self       string
 	Config     config.Dispatch

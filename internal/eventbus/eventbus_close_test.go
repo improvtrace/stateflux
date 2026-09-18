@@ -17,10 +17,10 @@ func (c *closableChannel) Close() error                                     { c.
 
 func TestEventBusCloseClosesEachChannelOnce(t *testing.T) {
 	closer := &closableChannel{}
-	bus, err := NewEventBus(map[string]channel.Channel{
+	bus, err := NewStatic(map[string]channel.Channel{
 		"a": closer,
 		"b": closer, // 同一实例重复注册，只应关闭一次
-	})
+	}, "")
 	if err != nil {
 		t.Fatalf("new eventbus: %v", err)
 	}

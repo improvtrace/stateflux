@@ -110,7 +110,7 @@ func (c *LedgerCycle) RunOnce(ctx context.Context) (CycleResult, error) {
 			res.Skipped++
 			continue
 		}
-		delivery, semantics := c.route(p)
+		delivery, semantics := c.route(ctx, p)
 		out, derr := c.dispatcher.Deliver(ctx, dispatch.Request{
 			Queue:         p.Channel,
 			Message:       msg,
@@ -159,10 +159,10 @@ func (c *LedgerCycle) message(ctx context.Context, p repository.Processing) (*ta
 
 // route 推导投递形态与语义：同步/异步由被解析 channel 的 Capabilities 决定（§14.1），
 // 语义默认取配置（节点间转发对已认领任务按 at_least_once 兜底）。
-func (c *LedgerCycle) route(p repository.Processing) (config.Delivery, config.Semantics) {
+func (c *LedgerCycle) route(ctx context.Context, p repository.Processing) (config.Delivery, config.Semantics) {
 	delivery := c.cfg.DefaultDelivery
 	if c.bus != nil {
-		if ch, err := c.bus.Resolve(p.Channel); err == nil {
+		if ch, err := c.bus.Channel(ctx, p.Channel); err == nil {
 			if ch.Capabilities().RequestReply {
 				delivery = config.DeliverySyncRPC
 			} else if ch.Capabilities().Subscribe {

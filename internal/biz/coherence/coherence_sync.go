@@ -19,7 +19,7 @@ type CoherenceSyncer struct {
 	store     *CoherenceStore
 	allocator Allocator
 	pusher    *CoherencePusher
-	nodes     *cluster.Cache
+	nodes     cluster.ClusterCacheView
 	queues    []string
 	interval  time.Duration
 	metrics   *obs.Metrics
@@ -35,7 +35,7 @@ type CoherenceSyncerOptions struct {
 	Store     *CoherenceStore
 	Allocator Allocator
 	Pusher    *CoherencePusher
-	Nodes     *cluster.Cache
+	Nodes     cluster.ClusterCacheView
 	Queues    []string
 	Interval  time.Duration
 	Metrics   *obs.Metrics

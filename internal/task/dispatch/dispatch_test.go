@@ -30,7 +30,7 @@ func (failingChannel) Call(context.Context, channel.Envelope) (channel.Envelope,
 
 func newDispatcher(t *testing.T, ch channel.Channel, cfg config.Dispatch) (*Dispatcher, cacheview.View) {
 	t.Helper()
-	bus, err := eventbus.NewEventBus(map[string]channel.Channel{"q": ch})
+	bus, err := eventbus.NewStatic(map[string]channel.Channel{"q": ch}, "q")
 	if err != nil {
 		t.Fatalf("eventbus: %v", err)
 	}

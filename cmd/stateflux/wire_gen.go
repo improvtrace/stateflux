@@ -22,15 +22,21 @@ func newApplication(ctx context.Context, cfg config.Config) (*server.App, func()
 	if err != nil {
 		return nil, nil, err
 	}
-	cache, cleanup := provideClusterCache(ctx, cfg, view)
-	string2 := provideNodeID(cache)
+	clusterCacheView, cleanup := provideClusterCache(ctx, cfg, view)
+	string2 := provideNodeID(clusterCacheView)
 	data, cleanup2, err := dataOpen(ctx, cfg)
 	if err != nil {
 		cleanup()
 		return nil, nil, err
 	}
 	dialer := provideDialer()
-	eventBus, err := provideEventBus(cfg, data, dialer)
+	cacheviewView, err := provideCacheView(cfg, data)
+	if err != nil {
+		cleanup2()
+		cleanup()
+		return nil, nil, err
+	}
+	eventBus, err := provideEventBus(cfg, data, dialer, clusterCacheView, cacheviewView)
 	if err != nil {
 		cleanup2()
 		cleanup()
@@ -49,13 +55,7 @@ func newApplication(ctx context.Context, cfg config.Config) (*server.App, func()
 		cleanup()
 		return nil, nil, err
 	}
-	cacheviewView, err := provideCacheView(cfg, data)
-	if err != nil {
-		cleanup2()
-		cleanup()
-		return nil, nil, err
-	}
-	resultPublisher := provideResultPublisher(cfg, eventBus, cache, cacheviewView)
+	resultPublisher := provideResultPublisher(cfg, eventBus, clusterCacheView, cacheviewView)
 	metrics, err := provideMetrics()
 	if err != nil {
 		cleanup2()
@@ -74,9 +74,9 @@ func newApplication(ctx context.Context, cfg config.Config) (*server.App, func()
 		return nil, nil, err
 	}
 	capabilityServer := provideCapabilityServer(workerRegistry, metrics)
-	dispatcher := provideDispatcher(cfg, string2, eventBus, cache, cacheviewView, codec, metrics)
-	forwarder := provideForwarder(cfg, string2, dialer, cache)
-	dispatchServer := provideDispatchServer(cfg, string2, dispatcher, cache, forwarder, metrics)
+	dispatcher := provideDispatcher(cfg, string2, eventBus, clusterCacheView, cacheviewView, codec, metrics)
+	forwarder := provideForwarder(cfg, string2, dialer, clusterCacheView)
+	dispatchServer := provideDispatchServer(cfg, string2, dispatcher, clusterCacheView, forwarder, metrics)
 	coherenceStore := provideCoherenceStore()
 	coherenceServer := provideCoherenceServer(coherenceStore, cacheviewView, metrics)
 	forwardRegistry := provideForwardRegistry()
@@ -92,9 +92,9 @@ func newApplication(ctx context.Context, cfg config.Config) (*server.App, func()
 	channelProbe := provideChannelProbe(data)
 	reconciler := provideReconciler(cfg, store, cacheviewView, channelProbe, metrics)
 	statefluxReconcileComponent := provideReconcileComponent(reconciler)
-	coherenceSyncer := provideCoherenceSyncer(cfg, string2, coherenceStore, cache, dialer, metrics)
+	coherenceSyncer := provideCoherenceSyncer(cfg, string2, coherenceStore, clusterCacheView, dialer, metrics)
 	statefluxSyncerComponent := provideSyncerComponent(coherenceSyncer)
-	coherencePuller := provideCoherencePuller(cfg, string2, coherenceStore, cache, dialer, cacheviewView, metrics)
+	coherencePuller := provideCoherencePuller(cfg, string2, coherenceStore, clusterCacheView, dialer, cacheviewView, metrics)
 	statefluxPullerComponent := providePullerComponent(coherencePuller)
 	factoryRegistry, err := provideFactoryRegistry(cfg)
 	if err != nil {
@@ -108,7 +108,7 @@ func newApplication(ctx context.Context, cfg config.Config) (*server.App, func()
 	statefluxFactoryComponent := provideFactoryComponent(manager)
 	runner := provideCollectorRunner(cfg, eventBus, collector, metrics)
 	statefluxCollectorRunnerComponent := provideCollectorRunnerComponent(runner)
-	v := provideComponents(cfg, string2, cache, eventBus, statefluxWorkerComponent, statefluxSchedulerComponent, statefluxReconcileComponent, statefluxSyncerComponent, statefluxPullerComponent, statefluxFactoryComponent, statefluxCollectorRunnerComponent)
+	v := provideComponents(cfg, string2, clusterCacheView, eventBus, statefluxWorkerComponent, statefluxSchedulerComponent, statefluxReconcileComponent, statefluxSyncerComponent, statefluxPullerComponent, statefluxFactoryComponent, statefluxCollectorRunnerComponent)
 	app, err := provideApp(cfg, grpcServer, httpServer, v, forwardRegistry, dispatchServer, health)
 	if err != nil {
 		cleanup3()

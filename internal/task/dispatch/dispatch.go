@@ -71,7 +71,7 @@ type Result struct {
 // Options 是 Dispatcher 的装配参数。
 type Options struct {
 	Bus       *eventbus.EventBus
-	Nodes     *cluster.Cache
+	Nodes     cluster.ClusterCacheView
 	View      cacheview.View
 	Codec     *codec.Codec
 	Self      string
@@ -83,7 +83,7 @@ type Options struct {
 // Dispatcher 执行单次本地分发编排。
 type Dispatcher struct {
 	bus       *eventbus.EventBus
-	nodes     *cluster.Cache
+	nodes     cluster.ClusterCacheView
 	view      cacheview.View
 	codec     *codec.Codec
 	self      string
@@ -173,7 +173,7 @@ func (d *Dispatcher) Deliver(ctx context.Context, req Request) (*Result, error) 
 	}
 
 	d.recordSend(ctx, queue, string(delivery))
-	resp, err := d.bus.Call(ctx, queue, env)
+	resp, err := d.bus.Call(ctx, env, eventbus.WithChannel(queue))
 	if err != nil {
 		res.Message = err.Error()
 		if d.metrics != nil {

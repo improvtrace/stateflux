@@ -65,7 +65,7 @@ func provideClusterView(cfg config.Config) (cluster.View, error) {
 // provideNodeID 返回本节点唯一 ID：节点信息运行时从集群视图获取（§2.1），
 // 取快照 Info.NodeID（集群服务端在 GetClusterInfo 响应中上报本节点身份）；
 // 视图未上报（首次快照为空等场景）时退化为内置单节点身份。
-func provideNodeID(cache *cluster.Cache) string {
+func provideNodeID(cache cluster.ClusterCacheView) string {
 	if id := cache.Snapshot().NodeID; id != "" {
 		return id
 	}
@@ -74,7 +74,7 @@ func provideNodeID(cache *cluster.Cache) string {
 
 // provideClusterCache 包装带快照的集群视图（热路径无网络 I/O）；
 // 刷新间隔取集群 DSN 的 interval 参数（默认 3s，0 = 只按需拉取）。
-func provideClusterCache(ctx context.Context, cfg config.Config, view cluster.View) (*cluster.Cache, func()) {
+func provideClusterCache(ctx context.Context, cfg config.Config, view cluster.View) (cluster.ClusterCacheView, func()) {
 	opts, err := config.ParseClusterDSN(cfg.Cluster.DSN)
 	if err != nil {
 		opts = config.ClusterOptions{Interval: config.DefaultClusterInterval}
@@ -97,9 +97,11 @@ func provideCacheView(cfg config.Config, d *data.Data) (cacheview.View, error) {
 	return cacheview.NewRedis(d.Redis(), opts)
 }
 
-// provideEventBus 注册全部逻辑 channel（§3.2）：异步为 Redis 形态，同步为 unary RPC，
-// 结果流为 gRPC stream；另提供内存 fake 以便单机冒烟与测试。
-func provideEventBus(cfg config.Config, d *data.Data, dialer *rpc.Dialer) (*eventbus.EventBus, error) {
+// provideEventBus 装配 eventbus（§3.2）：注入集群节点视图（cluster.ClusterCacheView）与
+// 队列↔节点映射表（由任务异步执行视图的队列路由反查），并按 ChannelSpec.Kind 惰性创建
+// channel。默认/同步/结果流与内存 fake 仍预注册为静态通道，保持既有语义；其余队列名
+// （task 行 channel 列）在首次订阅/发送时按需创建。
+func provideEventBus(cfg config.Config, d *data.Data, dialer *rpc.Dialer, cache cluster.ClusterCacheView, routes cacheview.View) (*eventbus.EventBus, error) {
 	if d == nil || d.Redis() == nil {
 		return nil, errors.New("server: redis client is required for eventbus channels")
 	}
@@ -138,7 +140,9 @@ func provideEventBus(cfg config.Config, d *data.Data, dialer *rpc.Dialer) (*even
 		"rpc-stream":   rpc.NewStream(dialer, timeout),
 		"memory":       mem.NewMemory(),
 	}
-	return eventbus.NewEventBus(channels)
+	factory := &channelFactory{redis: d.Redis(), dialer: dialer, timeout: timeout, ropts: ropts}
+	queues := newQueueRegistry(routes, channelNames())
+	return eventbus.NewEventBus(cache, queues, factory, channels, ChannelDefault)
 }
 
 // describeChannel 便于启动日志输出装配结果。
@@ -198,7 +202,7 @@ func provideHandlerRegistry() (*worker.HandlerRegistry, error) {
 }
 
 // provideResultPublisher 构造结果发布器（worker.ResultSink）。
-func provideResultPublisher(cfg config.Config, bus *eventbus.EventBus, cache *cluster.Cache, view cacheview.View) *biztask.ResultPublisher {
+func provideResultPublisher(cfg config.Config, bus *eventbus.EventBus, cache cluster.ClusterCacheView, view cacheview.View) *biztask.ResultPublisher {
 	channel := cfg.Dispatch.ResultChannel
 	if channel == "" {
 		channel = ChannelStream
@@ -246,7 +250,7 @@ func provideWAL(cfg config.Config) worker.WAL {
 // ---- 转发 ----
 
 // provideForwarder 构造节点间转发客户端（§15.1#6）。
-func provideForwarder(cfg config.Config, nodeID string, dialer *rpc.Dialer, cache *cluster.Cache) *forward.Forwarder {
+func provideForwarder(cfg config.Config, nodeID string, dialer *rpc.Dialer, cache cluster.ClusterCacheView) *forward.Forwarder {
 	return forward.NewForwarder(dialer, cache, nodeID, cfg.Dispatch.MaxHops)
 }
 
@@ -261,7 +265,7 @@ func provideForwardServer(cfg config.Config, nodeID string, reg *forward.Registr
 // ---- 分发 ----
 
 // provideDispatcher 构造调度侧分发器（§5.3）。
-func provideDispatcher(cfg config.Config, nodeID string, bus *eventbus.EventBus, cache *cluster.Cache, view cacheview.View, cdc *codec.Codec, metrics *obs.Metrics) *dispatch.Dispatcher {
+func provideDispatcher(cfg config.Config, nodeID string, bus *eventbus.EventBus, cache cluster.ClusterCacheView, view cacheview.View, cdc *codec.Codec, metrics *obs.Metrics) *dispatch.Dispatcher {
 	return dispatch.New(dispatch.Options{
 		Bus:     bus,
 		Nodes:   cache,
@@ -274,7 +278,7 @@ func provideDispatcher(cfg config.Config, nodeID string, bus *eventbus.EventBus,
 }
 
 // provideDispatchServer 构造分发服务端（§15.1#5）。
-func provideDispatchServer(cfg config.Config, nodeID string, d *dispatch.Dispatcher, cache *cluster.Cache, fwd *forward.Forwarder, metrics *obs.Metrics) *bizdispatch.DispatchServer {
+func provideDispatchServer(cfg config.Config, nodeID string, d *dispatch.Dispatcher, cache cluster.ClusterCacheView, fwd *forward.Forwarder, metrics *obs.Metrics) *bizdispatch.DispatchServer {
 	return bizdispatch.NewDispatchServer(bizdispatch.DispatchServerOptions{
 		Dispatcher: d,
 		Nodes:      cache,
@@ -296,7 +300,7 @@ func provideCoherenceServer(store *bizcoherence.CoherenceStore, view cacheview.V
 }
 
 // provideCoherenceSyncer 构造调度侧共识同步器：分配全部 WorkerQueues。
-func provideCoherenceSyncer(cfg config.Config, nodeID string, store *bizcoherence.CoherenceStore, cache *cluster.Cache, dialer *rpc.Dialer, metrics *obs.Metrics) *bizcoherence.CoherenceSyncer {
+func provideCoherenceSyncer(cfg config.Config, nodeID string, store *bizcoherence.CoherenceStore, cache cluster.ClusterCacheView, dialer *rpc.Dialer, metrics *obs.Metrics) *bizcoherence.CoherenceSyncer {
 	pusher := bizcoherence.NewCoherencePusher(dialer, cache, cfg.Dispatch.Timeout)
 	return bizcoherence.NewCoherenceSyncer(bizcoherence.CoherenceSyncerOptions{
 		Store:     store,
@@ -310,7 +314,7 @@ func provideCoherenceSyncer(cfg config.Config, nodeID string, store *bizcoherenc
 }
 
 // provideCoherencePuller 构造执行侧共识拉取器（§15.1#4）。
-func provideCoherencePuller(cfg config.Config, nodeID string, store *bizcoherence.CoherenceStore, cache *cluster.Cache, dialer *rpc.Dialer, view cacheview.View, metrics *obs.Metrics) *bizcoherence.CoherencePuller {
+func provideCoherencePuller(cfg config.Config, nodeID string, store *bizcoherence.CoherenceStore, cache cluster.ClusterCacheView, dialer *rpc.Dialer, view cacheview.View, metrics *obs.Metrics) *bizcoherence.CoherencePuller {
 	return bizcoherence.NewCoherencePuller(bizcoherence.CoherencePullerOptions{
 		Store:    store,
 		View:     view,
@@ -546,7 +550,7 @@ func (c *runnerComponent) Stop() error {
 func provideComponents(
 	cfg config.Config,
 	nodeID string,
-	cache *cluster.Cache,
+	cache cluster.ClusterCacheView,
 	bus *eventbus.EventBus,
 	writer workerComponent,
 	schedulers schedulerComponent,

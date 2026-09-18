@@ -48,7 +48,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 
 func TestRuntimeDynamicQueueSubscription(t *testing.T) {
 	mem1, mem2 := mem.NewMemory(), mem.NewMemory()
-	bus, err := eventbus.NewEventBus(map[string]channel.Channel{"q1": mem1, "q2": mem2})
+	bus, err := eventbus.NewStatic(map[string]channel.Channel{"q1": mem1, "q2": mem2}, "")
 	if err != nil {
 		t.Fatalf("eventbus: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestRuntimeDynamicQueueSubscription(t *testing.T) {
 
 func TestRuntimeHighWaterPausesNewSubscriptions(t *testing.T) {
 	mem1 := mem.NewMemory()
-	bus, err := eventbus.NewEventBus(map[string]channel.Channel{"q1": mem1})
+	bus, err := eventbus.NewStatic(map[string]channel.Channel{"q1": mem1}, "")
 	if err != nil {
 		t.Fatalf("eventbus: %v", err)
 	}

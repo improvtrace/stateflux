@@ -75,7 +75,7 @@ func (p *ResultPublisher) Publish(ctx context.Context, ev *taskv1.ResultEvent) e
 	}
 	callCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
-	if _, err := p.bus.Call(callCtx, p.channelName, env); err != nil {
+	if _, err := p.bus.Call(callCtx, env, eventbus.WithChannel(p.channelName)); err != nil {
 		return err
 	}
 	p.updateView(ctx, ev)

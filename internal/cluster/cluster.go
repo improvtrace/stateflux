@@ -222,6 +222,24 @@ func New(cfg config.Cluster) (View, error) {
 	}
 }
 
+// ClusterCacheView 是带快照的集群视图的只读接口（§15.1#3）：外部模块依赖该 interface
+// 而非 *Cache 具体类型——测试可注入替身，实现可替换（如后续的 watch 推送版）。
+// 读路径（Snapshot/Node/Nodes/Scheduler/Select）全部基于最近成功快照，无网络 I/O；
+// Refresh 主动拉取一次；Close 停止后台刷新，幂等。
+type ClusterCacheView interface {
+	Resolver
+	// Snapshot 返回最近一次成功拉取的快照（可能为空）。
+	Snapshot() Info
+	// Scheduler 返回当前调度节点快照。
+	Scheduler() (Node, bool)
+	// Select 基于最近快照按约束选执行节点。
+	Select(nodeID, vpc, label string, bucket int) (Node, bool)
+	// Refresh 主动拉取一次最新视图。
+	Refresh(ctx context.Context) error
+	// Close 停止后台刷新；幂等。
+	Close() error
+}
+
 // Cache 是带快照的视图包装：后台周期刷新（PollInterval > 0），读路径无网络 I/O，
 // 供转发器与分发器在热路径上同步解析节点地址。刷新失败保留上一份快照并记录错误，
 // 由调用方决定是否降级（集群视图是只读提示，PG 仍是唯一权威）。
@@ -239,7 +257,8 @@ type Cache struct {
 }
 
 // NewCache 包装一个 View 并立即做一次同步拉取；失败不返回错误（保留空快照，等待后续刷新）。
-func NewCache(ctx context.Context, view View, interval time.Duration) *Cache {
+// 返回 ClusterCacheView 接口：外部模块依赖 interface，不感知 *Cache 具体类型。
+func NewCache(ctx context.Context, view View, interval time.Duration) ClusterCacheView {
 	c := &Cache{view: view, interval: interval, stop: make(chan struct{}), done: make(chan struct{})}
 	_ = c.refresh(ctx)
 	if interval > 0 {
