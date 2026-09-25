@@ -28,23 +28,23 @@ type Ledger interface {
 }
 
 // Collector 把 ResultEvent 归集为终态。
+//
+// 回调派生（§5.6）不在归集侧进行：它在账本 Complete 的终态事务内完成（internal/domain/data
+// 的 deriveCallback），保证「终态与派生任务」原子可见；Collector 不重复声明这一职责。
 type Collector struct {
-	ledger     Ledger
-	metrics    *obs.Metrics
-	onTerminal func(ctx context.Context, req repository.CompleteRequest)
+	ledger  Ledger
+	metrics *obs.Metrics
 }
 
 // Options 是 Collector 装配参数。
 type Options struct {
 	Ledger  Ledger
 	Metrics *obs.Metrics
-	// OnTerminal 在终态提交成功后回调（如回调派生，§5.6）；可空。
-	OnTerminal func(ctx context.Context, req repository.CompleteRequest)
 }
 
 // New 构造 Collector。
 func New(opts Options) *Collector {
-	return &Collector{ledger: opts.Ledger, metrics: opts.Metrics, onTerminal: opts.OnTerminal}
+	return &Collector{ledger: opts.Ledger, metrics: opts.Metrics}
 }
 
 // Consume 归集一条结果，实现 biztask.ResultConsumer。
@@ -82,16 +82,6 @@ func (c *Collector) Consume(ctx context.Context, ev *taskv1.ResultEvent) error {
 		return err
 	}
 	c.record(ctx, outcome, ok)
-	if ok && c.onTerminal != nil {
-		c.onTerminal(ctx, repository.CompleteRequest{
-			TaskID:      ev.GetTaskId(),
-			Attempt:     ev.GetAttempt(),
-			Outcome:     outcome,
-			Result:      jsonOrRaw(ev.GetResult()),
-			Error:       ev.GetError(),
-			CompletedAt: completedAt,
-		})
-	}
 	return nil
 }
 

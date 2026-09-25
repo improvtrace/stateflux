@@ -9,16 +9,28 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	dispatchv1 "github.com/improvtrace/stateflux/api/stateflux/dispatch/v1"
-	bizcoherence "github.com/improvtrace/stateflux/internal/biz/coherence"
-	"github.com/improvtrace/stateflux/internal/biz/forward"
+	taskv1 "github.com/improvtrace/stateflux/api/stateflux/task/v1"
 	"github.com/improvtrace/stateflux/internal/cluster"
 	"github.com/improvtrace/stateflux/internal/config"
 	"github.com/improvtrace/stateflux/internal/obs"
+	"github.com/improvtrace/stateflux/internal/task"
 	taskdispatch "github.com/improvtrace/stateflux/internal/task/dispatch"
 )
 
 // DispatchMethod 是 DispatchService.Dispatch 的 RPC 方法全名（转发注册键，§15.1#6）。
 const DispatchMethod = "/dispatch.v1.DispatchService/Dispatch"
+
+// taskDispatcher 是 DispatchServer 依赖的分发最小面（由 taskdispatch.Dispatcher 实现；
+// 接口在此声明以便测试替身注入）。
+type taskDispatcher interface {
+	Deliver(ctx context.Context, req taskdispatch.Request) (*taskdispatch.Result, error)
+	ResolveTarget(msg *taskv1.TaskMessage) (cluster.Node, error)
+}
+
+// forwardClient 是节点间转发的最小面（由 forward.Forwarder 实现）。
+type forwardClient interface {
+	Forward(ctx context.Context, targetNodeID, method string, payload []byte, headers map[string]string, ttl int32) ([]byte, error)
+}
 
 // DispatchServer 实现 dispatch/v1.DispatchService（§15.1#5）：提供对外分发入口，
 // 支持 at_least_once / at_most_once / exactly_once 三种语义、redis 队列与 rpc 两种投递，
@@ -26,9 +38,9 @@ const DispatchMethod = "/dispatch.v1.DispatchService/Dispatch"
 type DispatchServer struct {
 	dispatchv1.UnimplementedDispatchServiceServer
 
-	dispatcher *taskdispatch.Dispatcher
+	dispatcher taskDispatcher
 	nodes      cluster.ClusterCacheView
-	forwarder  *forward.Forwarder
+	forwarder  forwardClient
 	self       string
 	cfg        config.Dispatch
 	metrics    *obs.Metrics
@@ -36,9 +48,9 @@ type DispatchServer struct {
 
 // DispatchServerOptions 是装配参数。
 type DispatchServerOptions struct {
-	Dispatcher *taskdispatch.Dispatcher
+	Dispatcher taskDispatcher
 	Nodes      cluster.ClusterCacheView
-	Forwarder  *forward.Forwarder
+	Forwarder  forwardClient
 	Self       string
 	Config     config.Dispatch
 	Metrics    *obs.Metrics
@@ -86,11 +98,9 @@ func (s *DispatchServer) forward(ctx context.Context, req *dispatchv1.DispatchRe
 	if err != nil {
 		return nil, err
 	}
-	visited := append(append([]string(nil), req.GetVisitedNodes()...), s.self)
 	headers := map[string]string{
-		"dispatch.origin":  s.self,
-		"dispatch.target":  target,
-		"dispatch.visited": joinVisit(visited),
+		"dispatch.origin": s.self,
+		"dispatch.target": target,
 	}
 	out, err := s.forwarder.Forward(ctx, target, DispatchMethod, payload, headers, int32(s.cfg.MaxHops))
 	if err != nil {
@@ -167,42 +177,21 @@ func (s *DispatchServer) HandleForwarded(ctx context.Context, payload []byte, he
 	return proto.Marshal(resp)
 }
 
-// LocalQueueFor 返回共识视图给出的队列归属（供执行节点决定订阅哪些队列）。
-func (s *DispatchServer) LocalQueueFor(state *bizcoherence.CoherenceStore, queue string) (string, bool) {
-	if state == nil {
-		return "", false
-	}
-	return state.QueueFor(queue)
-}
-
-func semanticsOf(v dispatchv1.Semantics) config.Semantics {
+// semanticsOf 把 proto 语义枚举映射为 task 领域枚举。
+func semanticsOf(v dispatchv1.Semantics) task.Semantics {
 	switch v {
 	case dispatchv1.Semantics_AT_MOST_ONCE:
-		return config.AtMostOnce
+		return task.AtMostOnce
 	case dispatchv1.Semantics_EXACTLY_ONCE:
-		return config.ExactlyOnce
+		return task.ExactlyOnce
 	default:
-		return config.AtLeastOnce
+		return task.AtLeastOnce
 	}
 }
 
-func deliveryOf(v dispatchv1.Delivery) config.Delivery {
+func deliveryOf(v dispatchv1.Delivery) task.Delivery {
 	if v == dispatchv1.Delivery_DELIVERY_SYNC_RPC {
-		return config.DeliverySyncRPC
+		return task.DeliverySyncRPC
 	}
-	return config.DeliveryRedisQueue
+	return task.DeliveryRedisQueue
 }
-
-func joinVisit(list []string) string {
-	out := ""
-	for i, s := range list {
-		if i > 0 {
-			out += ","
-		}
-		out += s
-	}
-	return out
-}
-
-// 编译期：确保 DispatchServer 能作为转发 handler 使用（签名与 forward.Handler 一致）。
-var _ = func(s *DispatchServer) forward.Handler { return s.HandleForwarded }

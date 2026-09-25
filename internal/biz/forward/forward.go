@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 
 	"google.golang.org/grpc"
@@ -57,11 +58,17 @@ func (r *Registry) Register(method string, h Handler) error {
 	return nil
 }
 
+// Handler 返回已注册的 handler；不存在返回 false。
+func (r *Registry) Handler(method string) (Handler, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	h, ok := r.handlers[method]
+	return h, ok
+}
+
 // Handle 调用本地 handler。
 func (r *Registry) Handle(ctx context.Context, method string, payload []byte, headers map[string]string) ([]byte, error) {
-	r.mu.RLock()
-	h, ok := r.handlers[method]
-	r.mu.RUnlock()
+	h, ok := r.Handler(method)
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", ErrNoHandler, method)
 	}
@@ -107,8 +114,8 @@ func (s *Server) Forward(ctx context.Context, req *forwardv1.ForwardRequest) (*f
 		return nil, fmt.Errorf("%w: %s already visited", ErrLoop, s.self)
 	}
 	if s.registry != nil {
-		if _, ok := s.lookup(req.GetMethod()); ok {
-			payload, err := s.registry.Handle(ctx, req.GetMethod(), req.GetPayload(), req.GetHeaders())
+		if h, ok := s.registry.Handler(req.GetMethod()); ok {
+			payload, err := h(ctx, req.GetPayload(), req.GetHeaders())
 			if err != nil {
 				return nil, err
 			}
@@ -132,13 +139,6 @@ func (s *Server) Forward(ctx context.Context, req *forwardv1.ForwardRequest) (*f
 		return &forwardv1.ForwardResponse{Payload: payload, ServedBy: target}, nil
 	}
 	return nil, fmt.Errorf("%w: %s", ErrNoHandler, req.GetMethod())
-}
-
-func (s *Server) lookup(method string) (Handler, bool) {
-	s.registry.mu.RLock()
-	defer s.registry.mu.RUnlock()
-	h, ok := s.registry.handlers[method]
-	return h, ok
 }
 
 // Dialer 是 Forwarder 依赖的 gRPC 连接池接口（rpc.Dialer 实现）。
@@ -177,6 +177,10 @@ func (f *Forwarder) Forward(ctx context.Context, targetNodeID, method string, pa
 	if ttl <= 0 {
 		ttl = int32(f.maxHops)
 	}
+	// 环路保护单一事实源：接续中转时上游把已访问节点写入 forward.visited 头，
+	// 这里合并进 VisitedNodes 后附上自身，接收端据此判定环路（§15.3#4）。
+	visited := splitVisited(headers["forward.visited"])
+	visited = append(visited, f.self)
 	conn, err := f.dialer.Conn(node.Address)
 	if err != nil {
 		return nil, err
@@ -186,7 +190,7 @@ func (f *Forwarder) Forward(ctx context.Context, targetNodeID, method string, pa
 		TargetNodeId: targetNodeID,
 		Payload:      payload,
 		Headers:      cloneHeaders(headers),
-		VisitedNodes: []string{f.self},
+		VisitedNodes: visited,
 		Ttl:          ttl,
 	})
 	if err != nil {
@@ -196,6 +200,14 @@ func (f *Forwarder) Forward(ctx context.Context, targetNodeID, method string, pa
 		return nil, errors.New(resp.GetError())
 	}
 	return resp.GetPayload(), nil
+}
+
+// splitVisited 解析逗号分隔的已访问节点列表；空串返回空切片。
+func splitVisited(joined string) []string {
+	if joined == "" {
+		return nil
+	}
+	return strings.Split(joined, ",")
 }
 
 func containsString(list []string, v string) bool {

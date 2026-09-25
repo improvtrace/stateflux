@@ -83,7 +83,10 @@ func (r *Registry) All() []Factory {
 type Manager struct {
 	registry *Registry
 	sink     Sink
-	clock    func() time.Time
+	// onError 在周期驱动的单工厂一轮失败时被调用（Run 内）；nil 时错误仅被丢弃——
+	// 装配方应注入告警回调，避免生成失败静默消失。
+	onError func(factory string, err error)
+	clock   func() time.Time
 }
 
 // NewManager 构造管理器；sink 为 nil 时 panic（生成的任务必须能落地）。
@@ -99,6 +102,12 @@ func (m *Manager) WithClock(clock func() time.Time) *Manager {
 	if clock != nil {
 		m.clock = clock
 	}
+	return m
+}
+
+// WithOnError 注入周期驱动失败告警（Run 循环内；RunOnce 的错误经返回值聚合）。
+func (m *Manager) WithOnError(fn func(factory string, err error)) *Manager {
+	m.onError = fn
 	return m
 }
 
@@ -144,9 +153,9 @@ func (m *Manager) Run(ctx context.Context) {
 				case <-ctx.Done():
 					return
 				case <-t.C:
-					// 单工厂一轮：失败只记录，不终止循环（下一周期重试）。
-					if _, err := m.RunOnceFactory(ctx, f, m.clock()); err != nil {
-						continue
+					// 单工厂一轮：失败记录告警（不终止循环，下一周期重试）。
+					if _, err := m.RunOnceFactory(ctx, f, m.clock()); err != nil && m.onError != nil {
+						m.onError(f.Name(), err)
 					}
 				}
 			}

@@ -66,6 +66,7 @@ func (v fakeView) Node(id string) (cluster.Node, bool) {
 	return n, ok
 }
 func (v fakeView) Nodes() []cluster.Node           { return nil }
+func (v fakeView) SchedulerNodeID() string         { return "sched" }
 func (v fakeView) Snapshot() cluster.Info          { return cluster.Info{} }
 func (v fakeView) Scheduler() (cluster.Node, bool) { return cluster.Node{}, false }
 func (v fakeView) Select(string, string, string, int) (cluster.Node, bool) {
@@ -184,7 +185,7 @@ func TestSubscribeTopicUsesLazyChannel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new eventbus: %v", err)
 	}
-	sub, err := bus.SubscribeTopic(context.Background(), TaskTopic("high"), func(context.Context, Envelope) error { return nil }, WithChannel("q1"))
+	sub, err := bus.SubscribeTopic(context.Background(), channel.Topic("task.high"), func(context.Context, Envelope) error { return nil }, WithChannel("q1"))
 	if err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}

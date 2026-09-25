@@ -3,8 +3,14 @@ package worker
 import (
 	"sync"
 
+	"google.golang.org/protobuf/proto"
+
 	taskv1 "github.com/improvtrace/stateflux/api/stateflux/task/v1"
 )
+
+// walEntryBytes 是单条未确认结果的计费口径：整条事件的 protobuf 编码大小（而非仅业务
+// 结果字段），保证高水位（条数/字节）反映真实的积压体量（§10）。
+func walEntryBytes(ev *taskv1.ResultEvent) int64 { return int64(proto.Size(ev)) }
 
 // walKey 是 WAL 条目键：task_id + attempt（attempt 是 fence，§3.1）。
 type walKey struct {
@@ -67,17 +73,17 @@ func (w *MemWAL) Add(ev *taskv1.ResultEvent) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if old, exists := w.entries[k]; exists {
-		w.bytes -= int64(len(old.GetResult()))
+		w.bytes -= walEntryBytes(old)
 	} else {
 		w.order = append(w.order, k)
 	}
 	w.entries[k] = ev
-	w.bytes += int64(len(ev.GetResult()))
+	w.bytes += walEntryBytes(ev)
 	for len(w.order) > w.max {
 		oldest := w.order[0]
 		w.order = w.order[1:]
 		if old, ok := w.entries[oldest]; ok {
-			w.bytes -= int64(len(old.GetResult()))
+			w.bytes -= walEntryBytes(old)
 			delete(w.entries, oldest)
 		}
 	}
@@ -92,7 +98,7 @@ func (w *MemWAL) Ack(taskID, attempt int64) {
 	if !ok {
 		return
 	}
-	w.bytes -= int64(len(ev.GetResult()))
+	w.bytes -= walEntryBytes(ev)
 	delete(w.entries, k)
 	for i, key := range w.order {
 		if key == k {

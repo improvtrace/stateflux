@@ -71,12 +71,12 @@ func Open(ctx context.Context, cfg config.Config) (*Data, func(), error) {
 	}
 
 	return &Data{
-			db:    ent.NewClient(ent.Driver(drv)),
-			redis: rdb,
-		}, func() {
-			_ = drv.Close()
-			_ = rdb.Close()
-		}, nil
+		db:    ent.NewClient(ent.Driver(drv)),
+		redis: rdb,
+	}, func() {
+		_ = drv.Close()
+		_ = rdb.Close()
+	}, nil
 }
 
 // openRedis 按地址数选择单机或 cluster 客户端：一个地址走单机，多个走 cluster。
@@ -109,9 +109,10 @@ func openRedis(cfg config.Redis) (redis.UniversalClient, error) {
 }
 
 // WithTx 返回一个以事务 client 为底层的数据视图：跨表挪行（晋升/认领/终态）必须
-// 同事务，事务内的仓储实例经它构造（§5.2/§5.5）。
+// 同事务，事务内的仓储实例经它构造（§5.2/§5.5）。事务随传入 ctx 建立——ctx 取消
+// 即中止开事务，避免调用方已放弃后仍占用连接。
 func (d *Data) WithTx(ctx context.Context, fn func(ctx context.Context) error) error {
-	tx, err := d.db.Tx(context.Background())
+	tx, err := d.db.Tx(ctx)
 	if err != nil {
 		return err
 	}

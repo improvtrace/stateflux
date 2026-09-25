@@ -10,6 +10,7 @@ import (
 	"github.com/improvtrace/stateflux/internal/domain/repository"
 	"github.com/improvtrace/stateflux/internal/eventbus"
 	"github.com/improvtrace/stateflux/internal/obs"
+	"github.com/improvtrace/stateflux/internal/task"
 	"github.com/improvtrace/stateflux/internal/task/dispatch"
 )
 
@@ -25,10 +26,16 @@ type Ledger interface {
 	DeadLetter(ctx context.Context, taskID int64) (bool, error)
 }
 
+// Deliverer 是调度周期的投递依赖面（由 task/dispatch.Dispatcher 实现；接口在此声明
+// 以便测试替身注入，避免 runtime 依赖 task/dispatch 的构造细节）。
+type Deliverer interface {
+	Deliver(ctx context.Context, req dispatch.Request) (*dispatch.Result, error)
+}
+
 // CycleOptions 是 LedgerCycle 装配参数。
 type CycleOptions struct {
 	Ledger       Ledger
-	Dispatcher   *dispatch.Dispatcher
+	Dispatcher   Deliverer
 	Bus          *eventbus.EventBus
 	NodeID       string
 	PromoteLimit int
@@ -40,7 +47,7 @@ type CycleOptions struct {
 // LedgerCycle 是默认调度周期（§5.2/§5.3）：晋升 → 认领 → 分发。
 type LedgerCycle struct {
 	ledger       Ledger
-	dispatcher   *dispatch.Dispatcher
+	dispatcher   Deliverer
 	bus          *eventbus.EventBus
 	nodeID       string
 	promoteLimit int
@@ -159,20 +166,20 @@ func (c *LedgerCycle) message(ctx context.Context, p repository.Processing) (*ta
 
 // route 推导投递形态与语义：同步/异步由被解析 channel 的 Capabilities 决定（§14.1），
 // 语义默认取配置（节点间转发对已认领任务按 at_least_once 兜底）。
-func (c *LedgerCycle) route(ctx context.Context, p repository.Processing) (config.Delivery, config.Semantics) {
+func (c *LedgerCycle) route(ctx context.Context, p repository.Processing) (task.Delivery, task.Semantics) {
 	delivery := c.cfg.DefaultDelivery
 	if c.bus != nil {
 		if ch, err := c.bus.Channel(ctx, p.Channel); err == nil {
 			if ch.Capabilities().RequestReply {
-				delivery = config.DeliverySyncRPC
+				delivery = task.DeliverySyncRPC
 			} else if ch.Capabilities().Subscribe {
-				delivery = config.DeliveryRedisQueue
+				delivery = task.DeliveryRedisQueue
 			}
 		}
 	}
 	semantics := c.cfg.DefaultSemantics
 	if semantics == "" {
-		semantics = config.AtLeastOnce
+		semantics = task.AtLeastOnce
 	}
 	return delivery, semantics
 }

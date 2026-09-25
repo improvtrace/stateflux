@@ -10,7 +10,6 @@ import (
 
 	entsql "entgo.io/ent/dialect/sql"
 
-	"github.com/improvtrace/stateflux/internal/domain"
 	"github.com/improvtrace/stateflux/internal/domain/data/ent"
 	"github.com/improvtrace/stateflux/internal/domain/data/ent/taskidentity"
 	"github.com/improvtrace/stateflux/internal/domain/data/ent/taskpayload"
@@ -19,6 +18,7 @@ import (
 	"github.com/improvtrace/stateflux/internal/domain/data/ent/taskresult"
 	"github.com/improvtrace/stateflux/internal/domain/repository"
 	"github.com/improvtrace/stateflux/internal/domain/schema"
+	"github.com/improvtrace/stateflux/pkg/idgen"
 )
 
 var (
@@ -92,13 +92,13 @@ var _ repository.Store = (*store)(nil)
 
 // NewStore 从 Data 构造组合根 Store（§3.1/§5.2/§5.5）：回调派生任务使用默认雪花生成器。
 func NewStore(data *Data) repository.Store {
-	return NewStoreWithIDGenerator(data, domain.NewSnowflake("callback").Next)
+	return NewStoreWithIDGenerator(data, idgen.NewSnowflake("callback").Next)
 }
 
 // NewStoreWithIDGenerator 允许注入派生任务 ID 生成器（装配期可复用节点雪花，保证全局唯一）。
 func NewStoreWithIDGenerator(data *Data, next func() int64) repository.Store {
 	if next == nil {
-		next = domain.NewSnowflake("callback").Next
+		next = idgen.NewSnowflake("callback").Next
 	}
 	return &store{
 		data:         data,
@@ -550,7 +550,7 @@ func (s *store) ResetExpired(ctx context.Context, deadline time.Time, limit int)
 	return reset, nil
 }
 
-// GetProcessing 按 task_id 读取在途行（不存在返回 ent.NotFoundError）。
+// GetProcessing 按 task_id 读取在途行（不存在返回 Not Found 错误）。
 func (s *store) GetProcessing(ctx context.Context, taskID int64) (*repository.Processing, error) {
 	p, err := s.data.db.TaskProcessing.Query().Where(taskprocessing.ID(taskID)).Only(ctx)
 	if err != nil {
@@ -560,21 +560,14 @@ func (s *store) GetProcessing(ctx context.Context, taskID int64) (*repository.Pr
 	return &row, nil
 }
 
-// GetResult 按 task_id 读取终态结果（不存在返回 ent.NotFoundError）。
+// GetResult 按 task_id 读取终态结果（不存在返回 Not Found 错误）。
 func (s *store) GetResult(ctx context.Context, taskID int64) (*repository.Result, error) {
 	r, err := s.data.db.TaskResult.Query().Where(taskresult.ID(taskID)).Only(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return &repository.Result{
-		TaskID:      r.ID,
-		Outcome:     schema.Outcome(r.Outcome),
-		Attempt:     r.Attempt,
-		Payload:     json.RawMessage(r.Payload),
-		Result:      json.RawMessage(r.Result),
-		Error:       r.Error,
-		CompletedAt: r.CompletedAt,
-	}, nil
+	res := resultFromEnt(r)
+	return &res, nil
 }
 
 // CountPending 返回待晋升行数。
@@ -590,32 +583,4 @@ func (s *store) CountSchedulable(ctx context.Context) (int, error) {
 // CountProcessing 返回在途行数。
 func (s *store) CountProcessing(ctx context.Context) (int, error) {
 	return s.data.db.TaskProcessing.Query().Count(ctx)
-}
-
-// processingFromEnt 把 ent 实体投影为组合根只读结构（§5.2）。
-func processingFromEnt(p *ent.TaskProcessing) repository.Processing {
-	return repository.Processing{
-		TaskID:         p.ID,
-		Type:           p.Type,
-		Operator:       p.Operator,
-		Priority:       schema.Priority(p.Priority),
-		Channel:        p.Channel,
-		TimeoutMs:      p.TimeoutMs,
-		MaxAttempts:    p.MaxAttempts,
-		Attempt:        p.Attempts,
-		ClaimedNode:    p.ClaimedNode,
-		IdempotencyKey: p.IdempotencyKey,
-		Callback:       json.RawMessage(p.Callback),
-		ParentTaskID:   p.ParentTaskID,
-		Vpc:            p.Vpc,
-		Node:           p.Node,
-		Label:          p.Label,
-		HashBucket:     p.HashBucket,
-		BizRaceLabels:  p.BizRaceLabels,
-		BizRaceEntry:   p.BizRaceEntry,
-		BizGroup:       p.BizGroup,
-		BizBatchID:     p.BizBatchID,
-		CreatedAt:      p.CreatedAt,
-		UpdatedAt:      p.UpdatedAt,
-	}
 }

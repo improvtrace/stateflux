@@ -160,17 +160,17 @@ func (w *DiskWAL) Ack(taskID, attempt int64) {
 func (w *DiskWAL) applyAdd(ev *taskv1.ResultEvent) {
 	k := walKey{TaskID: ev.GetTaskId(), Attempt: ev.GetAttempt()}
 	if old, ok := w.entries[k]; ok {
-		w.bytes -= int64(len(old.GetResult()))
+		w.bytes -= walEntryBytes(old)
 	} else {
 		w.order = append(w.order, k)
 	}
 	w.entries[k] = ev
-	w.bytes += int64(len(ev.GetResult()))
+	w.bytes += walEntryBytes(ev)
 	for len(w.order) > w.max {
 		oldest := w.order[0]
 		w.order = w.order[1:]
 		if old, ok := w.entries[oldest]; ok {
-			w.bytes -= int64(len(old.GetResult()))
+			w.bytes -= walEntryBytes(old)
 			delete(w.entries, oldest)
 		}
 	}
@@ -182,7 +182,7 @@ func (w *DiskWAL) applyAck(taskID, attempt int64) {
 	if !ok {
 		return
 	}
-	w.bytes -= int64(len(ev.GetResult()))
+	w.bytes -= walEntryBytes(ev)
 	delete(w.entries, k)
 	for i, key := range w.order {
 		if key == k {

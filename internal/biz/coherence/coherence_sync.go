@@ -3,14 +3,15 @@ package coherence
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	coherencev1 "github.com/improvtrace/stateflux/api/stateflux/coherence/v1"
 	"github.com/improvtrace/stateflux/internal/cluster"
-	"github.com/improvtrace/stateflux/internal/eventbus/channel/rpc"
 	"github.com/improvtrace/stateflux/internal/obs"
+	"github.com/improvtrace/stateflux/pkg/transport"
 )
 
 // CoherenceSyncer 是调度侧的共识同步运行时（§15.1#4、§15.3#3）：周期计算
@@ -145,7 +146,7 @@ func (s *CoherenceSyncer) SyncOnce(ctx context.Context) error {
 type CoherencePuller struct {
 	store    *CoherenceStore
 	view     cacheviewSetter
-	dialer   *rpc.Dialer
+	dialer   *transport.Dialer
 	nodes    cluster.Resolver
 	self     string
 	interval time.Duration
@@ -165,7 +166,7 @@ type cacheviewSetter interface {
 type CoherencePullerOptions struct {
 	Store    *CoherenceStore
 	View     cacheviewSetter
-	Dialer   *rpc.Dialer
+	Dialer   *transport.Dialer
 	Nodes    cluster.Resolver
 	Self     string
 	Interval time.Duration
@@ -241,9 +242,10 @@ func (p *CoherencePuller) PullOnce(ctx context.Context) error {
 	if p.dialer == nil || p.nodes == nil {
 		return errors.New("biz: coherence puller missing dialer or cluster view")
 	}
-	scheduler, ok := p.nodes.Node(SchedulerNodeID(p.nodes))
+	schedulerID := p.nodes.SchedulerNodeID()
+	scheduler, ok := p.nodes.Node(schedulerID)
 	if !ok || scheduler.Address == "" {
-		return errors.New("biz: no scheduler node to pull coherence from")
+		return fmt.Errorf("biz: no scheduler node to pull coherence from (leader=%q)", schedulerID)
 	}
 	conn, err := p.dialer.Conn(scheduler.Address)
 	if err != nil {
@@ -279,12 +281,4 @@ func (p *CoherencePuller) PullOnce(ctx context.Context) error {
 		p.metrics.CoherenceSyncRecord(ctx, "ok", 1)
 	}
 	return nil
-}
-
-func SchedulerNodeID(nodes cluster.Resolver) string {
-	type snapshotter interface{ Snapshot() cluster.Info }
-	if s, ok := nodes.(snapshotter); ok {
-		return s.Snapshot().SchedulerNodeID
-	}
-	return ""
 }

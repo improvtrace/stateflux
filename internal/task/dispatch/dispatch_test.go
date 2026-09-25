@@ -52,8 +52,8 @@ func newDispatcher(t *testing.T, ch channel.Channel, cfg config.Dispatch) (*Disp
 func TestDeliverAsyncEncodesAndMarksView(t *testing.T) {
 	memCh := mem.NewMemory()
 	d, view := newDispatcher(t, memCh, config.Dispatch{
-		DefaultSemantics: config.AtLeastOnce,
-		DefaultDelivery:  config.DeliveryRedisQueue,
+		DefaultSemantics: task.AtLeastOnce,
+		DefaultDelivery:  task.DeliveryRedisQueue,
 	})
 	received := make(chan channel.Envelope, 1)
 	sub, err := memCh.Subscribe(context.Background(), channel.Topic("q"), func(_ context.Context, env channel.Envelope) error {
@@ -96,8 +96,8 @@ func TestDeliverAsyncEncodesAndMarksView(t *testing.T) {
 func TestExactlyOnceDedupe(t *testing.T) {
 	memCh := mem.NewMemory()
 	d, _ := newDispatcher(t, memCh, config.Dispatch{
-		DefaultSemantics: config.ExactlyOnce,
-		DefaultDelivery:  config.DeliveryRedisQueue,
+		DefaultSemantics: task.ExactlyOnce,
+		DefaultDelivery:  task.DeliveryRedisQueue,
 	})
 	msg := &taskv1.TaskMessage{TaskId: 9, Attempt: 1, IdempotencyKey: "k-9", Channel: "q"}
 	first, err := d.Deliver(context.Background(), Request{Message: msg})
@@ -115,8 +115,8 @@ func TestExactlyOnceDedupe(t *testing.T) {
 
 func TestSemanticsOnSendFailure(t *testing.T) {
 	dAtMost, _ := newDispatcher(t, failingChannel{}, config.Dispatch{
-		DefaultSemantics: config.AtMostOnce,
-		DefaultDelivery:  config.DeliveryRedisQueue,
+		DefaultSemantics: task.AtMostOnce,
+		DefaultDelivery:  task.DeliveryRedisQueue,
 	})
 	res, err := dAtMost.Deliver(context.Background(), Request{Message: &taskv1.TaskMessage{TaskId: 1, Channel: "q"}})
 	if err != nil {
@@ -127,8 +127,8 @@ func TestSemanticsOnSendFailure(t *testing.T) {
 	}
 
 	dAtLeast, _ := newDispatcher(t, failingChannel{}, config.Dispatch{
-		DefaultSemantics: config.AtLeastOnce,
-		DefaultDelivery:  config.DeliveryRedisQueue,
+		DefaultSemantics: task.AtLeastOnce,
+		DefaultDelivery:  task.DeliveryRedisQueue,
 	})
 	if _, err := dAtLeast.Deliver(context.Background(), Request{Message: &taskv1.TaskMessage{TaskId: 2, Channel: "q"}}); err == nil {
 		t.Fatal("at_least_once must surface send failure for retry")

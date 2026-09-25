@@ -73,16 +73,14 @@ func SignatureOf(taskType, operator string) Signature {
 // 注册「签名 → 原型消息构造器」，消费端据签名重建具体业务消息。注册表在装配期
 // 由 biz 填充，运行期只读。
 type Registry struct {
-	mu       sync.RWMutex
-	protos   map[Signature]func() proto.Message
-	handlers map[Signature]struct{}
+	mu     sync.RWMutex
+	protos map[Signature]func() proto.Message
 }
 
 // NewRegistry 创建空注册表。
 func NewRegistry() *Registry {
 	return &Registry{
-		protos:   map[Signature]func() proto.Message{},
-		handlers: map[Signature]struct{}{},
+		protos: map[Signature]func() proto.Message{},
 	}
 }
 
@@ -138,19 +136,4 @@ func (r *Registry) Signatures() []Signature {
 	r.mu.RUnlock()
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out
-}
-
-// MarkHandler 标记签名已有 handler 注册（执行侧能力发现，§5.4）。
-func (r *Registry) MarkHandler(sig Signature) {
-	r.mu.Lock()
-	r.handlers[sig] = struct{}{}
-	r.mu.Unlock()
-}
-
-// HasHandler 判断签名是否有 handler。
-func (r *Registry) HasHandler(sig Signature) bool {
-	r.mu.RLock()
-	_, ok := r.handlers[sig]
-	r.mu.RUnlock()
-	return ok
 }

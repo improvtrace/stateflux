@@ -15,8 +15,8 @@ import (
 	coherencev1 "github.com/improvtrace/stateflux/api/stateflux/coherence/v1"
 	"github.com/improvtrace/stateflux/internal/cluster"
 	"github.com/improvtrace/stateflux/internal/domain/cacheview"
-	"github.com/improvtrace/stateflux/internal/eventbus/channel/rpc"
 	"github.com/improvtrace/stateflux/internal/obs"
+	"github.com/improvtrace/stateflux/pkg/transport"
 )
 
 // CoherenceStore 是共识信息的进程内持有者（§15.1#4）：只有调度节点会 Apply 新快照，
@@ -190,13 +190,13 @@ func (a Allocator) Assign(queues []string, nodes []cluster.Node, revision int64,
 
 // CoherencePusher 是调度侧推送客户端（§15.1#4）：把快照 Notify 给执行节点。
 type CoherencePusher struct {
-	dialer  *rpc.Dialer
+	dialer  *transport.Dialer
 	nodes   cluster.Resolver
 	timeout time.Duration
 }
 
 // NewCoherencePusher 构造推送器。
-func NewCoherencePusher(dialer *rpc.Dialer, nodes cluster.Resolver, timeout time.Duration) *CoherencePusher {
+func NewCoherencePusher(dialer *transport.Dialer, nodes cluster.Resolver, timeout time.Duration) *CoherencePusher {
 	return &CoherencePusher{dialer: dialer, nodes: nodes, timeout: timeout}
 }
 

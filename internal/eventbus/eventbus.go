@@ -10,27 +10,6 @@ import (
 	"github.com/improvtrace/stateflux/internal/eventbus/channel"
 )
 
-// EventKind 是节点事件类别（§3.2）。eventbus 订阅的目标是节点：一个节点有两类
-// 事件支持订阅——system（系统事件）与 result（结果事件，ResultEvent 汇集）。
-type EventKind string
-
-const (
-	// EventSystem 是节点系统事件：控制指令、生命周期与运维信号（§6.2）。
-	EventSystem EventKind = "system"
-	// EventResult 是节点结果事件：worker 发布的 ResultEvent 汇集（§5.5）。
-	EventResult EventKind = "result"
-)
-
-// NodeTopic 返回某节点某类事件的 topic：node.{nodeID}.{event}（§3.2）。
-func NodeTopic(nodeID string, kind EventKind) channel.Topic {
-	return channel.Topic("node." + nodeID + "." + string(kind))
-}
-
-// TaskTopic 返回任务分发 topic：task.{band}（§5.3）。band 是数值 priority 的派生档位
-// （schema.BandOf：low/normal/high）；topic 只做投递分组，精确顺序由 PG 的 priority
-// 排序决定（§5.2）。
-func TaskTopic(band string) channel.Topic { return channel.Topic("task." + band) }
-
 // ResultTopic 返回结果归集 topic：result（§5.5）。同步 RPC 响应与异步 worker 结果都
 // 适配为 ResultEvent 后发布到该 topic，由 Collector 统一订阅。
 func ResultTopic() channel.Topic { return channel.Topic("result") }
@@ -324,20 +303,10 @@ func applyOptions(opts []Option) Options {
 	return o
 }
 
-// SubscribeTopic 在任意 topic 上订阅：按 options（或默认 channel）解析并惰性创建 channel，
-// 要求该实现具备 Subscriber 能力。任务队列订阅（task.{band}）走这里。
+// SubscribeTopic 在逻辑队列/topic 上订阅（任务队列名或 result）：按 options（或默认
+// channel）解析并惰性创建 channel，要求该实现具备 Subscriber 能力。
 func (b *EventBus) SubscribeTopic(ctx context.Context, topic channel.Topic, h Handler, opts ...Option) (Subscription, error) {
-	return b.subscribe(ctx, topic, h, "", opts)
-}
-
-// Subscribe 订阅某节点的一类事件（system / result）：按节点经 QueueRegistry 解析队列
-// channel（或经 options 指定），惰性创建后在 node.{nodeID}.{event} topic 上建立订阅。
-func (b *EventBus) Subscribe(ctx context.Context, nodeID string, kind EventKind, h Handler, opts ...Option) (Subscription, error) {
-	return b.subscribe(ctx, NodeTopic(nodeID, kind), h, nodeID, opts)
-}
-
-func (b *EventBus) subscribe(ctx context.Context, topic channel.Topic, h Handler, target string, opts []Option) (Subscription, error) {
-	r, err := b.resolve(ctx, applyOptions(opts), target)
+	r, err := b.resolve(ctx, applyOptions(opts), "")
 	if err != nil {
 		return nil, err
 	}

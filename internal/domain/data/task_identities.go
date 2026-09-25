@@ -9,7 +9,8 @@ import (
 	"github.com/improvtrace/stateflux/internal/domain/repository"
 )
 
-// taskIdentitiesRepo 是 repository.TaskIdentitiesRepository 的 ent 实现（§3.1/§5.1）。
+// taskIdentitiesRepo 是 repository.TaskIdentitiesRepository 的 ent 实现（§3.1/§5.1）：
+// 仓储实体与 ent 实体的转换集中在本文件（§8）。
 type taskIdentitiesRepo struct {
 	data *Data
 }
@@ -19,24 +20,24 @@ func NewTaskIdentities(data *Data) repository.TaskIdentitiesRepository {
 	return &taskIdentitiesRepo{data: data}
 }
 
-func (r *taskIdentitiesRepo) Put(ctx context.Context, identities []*ent.TaskIdentity) ([]int64, []bool, error) {
+func (r *taskIdentitiesRepo) Put(ctx context.Context, identities []repository.Identity) ([]int64, []bool, error) {
 	ids := make([]int64, len(identities))
 	created := make([]bool, len(identities))
 	for i, identity := range identities {
 		err := r.data.db.TaskIdentity.Create().
-			SetID(identity.ID).
+			SetID(identity.TaskID).
 			SetIdempotencyKey(identity.IdempotencyKey).
 			Exec(ctx)
 		switch {
 		case err == nil:
-			ids[i], created[i] = identity.ID, true
+			ids[i], created[i] = identity.TaskID, true
 		case ent.IsConstraintError(err):
 			// dedupe 命中：返回账本中已有的原 task_id（§5.1）。
 			row, gerr := r.GetByIdempotencyKey(ctx, identity.IdempotencyKey)
 			if gerr != nil {
 				return nil, nil, gerr
 			}
-			ids[i], created[i] = row.ID, false
+			ids[i], created[i] = row.TaskID, false
 		default:
 			return nil, nil, err
 		}
@@ -44,10 +45,24 @@ func (r *taskIdentitiesRepo) Put(ctx context.Context, identities []*ent.TaskIden
 	return ids, created, nil
 }
 
-func (r *taskIdentitiesRepo) GetByIdempotencyKey(ctx context.Context, idempotencyKey string) (*ent.TaskIdentity, error) {
-	return r.data.db.TaskIdentity.Query().Where(taskidentity.IdempotencyKey(idempotencyKey)).Only(ctx)
+func (r *taskIdentitiesRepo) GetByIdempotencyKey(ctx context.Context, idempotencyKey string) (*repository.Identity, error) {
+	row, err := r.data.db.TaskIdentity.Query().Where(taskidentity.IdempotencyKey(idempotencyKey)).Only(ctx)
+	if err != nil {
+		return nil, err
+	}
+	id := identityFromEnt(row)
+	return &id, nil
 }
 
 func (r *taskIdentitiesRepo) DeleteCreatedBefore(ctx context.Context, cutoff time.Time) (int, error) {
 	return r.data.db.TaskIdentity.Delete().Where(taskidentity.CreatedAtLT(cutoff)).Exec(ctx)
+}
+
+// identityFromEnt 把 ent 实体投影为仓储实体（§5.1）。
+func identityFromEnt(row *ent.TaskIdentity) repository.Identity {
+	return repository.Identity{
+		TaskID:         row.ID,
+		IdempotencyKey: row.IdempotencyKey,
+		CreatedAt:      row.CreatedAt,
+	}
 }

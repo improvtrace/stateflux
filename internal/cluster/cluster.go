@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"hash/fnv"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -177,11 +178,7 @@ func Select(nodes []Node, nodeID, vpc, label string, bucket int) (Node, bool) {
 
 // sortNodes 稳定排序（ID 升序）：保证同一快照下分桶结果可复现。
 func sortNodes(nodes []Node) {
-	for i := 1; i < len(nodes); i++ {
-		for j := i; j > 0 && nodes[j].ID < nodes[j-1].ID; j-- {
-			nodes[j], nodes[j-1] = nodes[j-1], nodes[j]
-		}
-	}
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].ID < nodes[j].ID })
 }
 
 func bucketIndex(nodes []Node, bucket int) int {
@@ -333,14 +330,20 @@ func (c *Cache) Close() error {
 	return nil
 }
 
-// Resolver 是热路径地址解析的最小接口，便于测试替身注入。
+// Resolver 是热路径地址解析的最小接口，便于测试替身注入：按 ID 解析节点、取节点集合，
+// 并给出当前调度节点（coherence 推送/拉取与结果归集都据此定位调度节点）。
 type Resolver interface {
 	Node(id string) (Node, bool)
 	Nodes() []Node
+	// SchedulerNodeID 返回当前调度节点 ID；视图未选出 leader 时为空。
+	SchedulerNodeID() string
 }
 
 // Nodes 返回快照节点集合。
 func (c *Cache) Nodes() []Node { return c.Snapshot().Nodes }
+
+// SchedulerNodeID 返回当前调度节点 ID。
+func (c *Cache) SchedulerNodeID() string { return c.Snapshot().SchedulerNodeID }
 
 // atomicInfo 供需要无锁快照的实现复用。
 type atomicInfo struct{ v atomic.Value }

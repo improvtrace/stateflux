@@ -12,18 +12,19 @@ import (
 	"github.com/improvtrace/stateflux/internal/domain/schema"
 	domaintask "github.com/improvtrace/stateflux/internal/task"
 	"github.com/improvtrace/stateflux/internal/task/factory"
+	"github.com/improvtrace/stateflux/pkg/idgen"
 )
 
 // Enqueuer 把 factory 生成的任务写入 PG 创建路径（§5.1、§15.1#12）：雪花生成任务 ID，
 // 经 repository.Store.Enqueue 在单事务内写身份账本、payload 与 pending。
 type Enqueuer struct {
 	store          repository.Store
-	ids            *domain.Snowflake
+	ids            *idgen.Snowflake
 	defaultChannel string
 }
 
 // NewEnqueuer 构造入队器。
-func NewEnqueuer(store repository.Store, ids *domain.Snowflake, defaultChannel string) *Enqueuer {
+func NewEnqueuer(store repository.Store, ids *idgen.Snowflake, defaultChannel string) *Enqueuer {
 	return &Enqueuer{store: store, ids: ids, defaultChannel: defaultChannel}
 }
 

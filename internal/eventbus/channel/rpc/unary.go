@@ -8,6 +8,7 @@ import (
 
 	taskv1 "github.com/improvtrace/stateflux/api/stateflux/task/v1"
 	"github.com/improvtrace/stateflux/internal/eventbus/channel"
+	"github.com/improvtrace/stateflux/pkg/transport"
 )
 
 // Unary 是半双工 request/reply 的 gRPC adapter（§7）：把 channel.Envelope 与
@@ -19,12 +20,12 @@ import (
 //
 // env.Target 必须是执行节点的 gRPC 地址（host:port）。
 type Unary struct {
-	dialer  *Dialer
+	dialer  *transport.Dialer
 	timeout time.Duration
 }
 
 // NewUnary 构造 unary 通道；timeout <= 0 时使用调用方 ctx 的截止时间。
-func NewUnary(dialer *Dialer, timeout time.Duration) *Unary {
+func NewUnary(dialer *transport.Dialer, timeout time.Duration) *Unary {
 	return &Unary{dialer: dialer, timeout: timeout}
 }
 
@@ -57,7 +58,7 @@ func (u *Unary) Call(ctx context.Context, env channel.Envelope) (channel.Envelop
 	if err != nil {
 		return channel.Envelope{}, err
 	}
-	callCtx, cancel := withTimeout(ctx, u.timeout)
+	callCtx, cancel := transport.WithTimeout(ctx, u.timeout)
 	defer cancel()
 
 	resp, err := taskv1.NewExecutorServiceClient(conn).Execute(callCtx, &taskv1.ExecuteRequest{Task: msg})

@@ -11,6 +11,7 @@ import (
 
 	taskv1 "github.com/improvtrace/stateflux/api/stateflux/task/v1"
 	"github.com/improvtrace/stateflux/internal/eventbus/channel"
+	"github.com/improvtrace/stateflux/pkg/transport"
 )
 
 // Stream 是双向 ResultStream 的**发送侧** adapter（§5.4、§7）：worker 经它与调度节点
@@ -23,7 +24,7 @@ import (
 // 编解码约定：env.Payload 是 taskv1.ResultEvent 的 protobuf 二进制；返回信封的 Payload 是
 // taskv1.ResultAck 的 protobuf 二进制（Call 成功即表示收到 ack）。
 type Stream struct {
-	dialer  *Dialer
+	dialer  *transport.Dialer
 	timeout time.Duration
 
 	mu      sync.Mutex
@@ -32,7 +33,7 @@ type Stream struct {
 }
 
 // NewStream 构造 stream 通道。
-func NewStream(dialer *Dialer, timeout time.Duration) *Stream {
+func NewStream(dialer *transport.Dialer, timeout time.Duration) *Stream {
 	return &Stream{dialer: dialer, timeout: timeout, streams: map[string]*streamConn{}}
 }
 
@@ -66,7 +67,7 @@ func (s *Stream) Call(ctx context.Context, env channel.Envelope) (channel.Envelo
 	if err != nil {
 		return channel.Envelope{}, err
 	}
-	callCtx, cancel := withTimeout(ctx, s.timeout)
+	callCtx, cancel := transport.WithTimeout(ctx, s.timeout)
 	defer cancel()
 	ack, err := sc.send(callCtx, ev)
 	if err != nil {

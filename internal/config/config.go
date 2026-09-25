@@ -10,6 +10,8 @@ import (
 	"github.com/mitchellh/mapstructure"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
+
+	"github.com/improvtrace/stateflux/internal/task"
 )
 
 // Config 是服务总配置（§8、§15.1#3）：flag/env 解析后填充，缺省值由 Default 提供。
@@ -227,34 +229,14 @@ type Runtime struct {
 	WALMaxBytes int64 `mapstructure:"wal_max_bytes"`
 }
 
-// Delivery 是分发投递形态（§15.1#5）。
-type Delivery string
-
-const (
-	// DeliveryRedisQueue 异步 redis queue 投递。
-	DeliveryRedisQueue Delivery = "redis_queue"
-	// DeliverySyncRPC 同步 rpc 投递。
-	DeliverySyncRPC Delivery = "sync_rpc"
-)
-
-// Semantics 是 Dispatch 的投递语义（§15.1#5）。
-type Semantics string
-
-const (
-	// AtLeastOnce 至少一次：允许重复，失败可重试。
-	AtLeastOnce Semantics = "at_least_once"
-	// AtMostOnce 至多一次：放弃重试，允许丢失。
-	AtMostOnce Semantics = "at_most_once"
-	// ExactlyOnce 尽力恰一次：入口去重 + 幂等账本，通道丢失仍由对账兜底。
-	ExactlyOnce Semantics = "exactly_once"
-)
-
-// Dispatch 是分发器配置（§15.1#5）。
+// Dispatch 是分发器配置（§15.1#5）。投递语义与形态的取值域（Semantics/Delivery）是任务
+// 分发的领域词汇，定义在 internal/task（task.Semantics / task.Delivery）；本结构只承载
+// 默认值与开关。
 type Dispatch struct {
 	// DefaultSemantics 未显式指定时的投递语义。
-	DefaultSemantics Semantics `mapstructure:"default_semantics"`
+	DefaultSemantics task.Semantics `mapstructure:"default_semantics"`
 	// DefaultDelivery 未显式指定时的投递形态。
-	DefaultDelivery Delivery `mapstructure:"default_delivery"`
+	DefaultDelivery task.Delivery `mapstructure:"default_delivery"`
 	// Forward 是否允许节点间转发。
 	Forward bool `mapstructure:"forward"`
 	// MaxHops 转发跳数上限（环路保护）。
@@ -329,8 +311,8 @@ func Default() Config {
 			WALMaxBytes:       256 << 20,
 		},
 		Dispatch: Dispatch{
-			DefaultSemantics: AtLeastOnce,
-			DefaultDelivery:  DeliveryRedisQueue,
+			DefaultSemantics: task.AtLeastOnce,
+			DefaultDelivery:  task.DeliveryRedisQueue,
 			Forward:          true,
 			MaxHops:          3,
 			Timeout:          10 * time.Second,

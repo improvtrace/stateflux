@@ -24,6 +24,7 @@ import (
 	"github.com/improvtrace/stateflux/internal/eventbus"
 	"github.com/improvtrace/stateflux/internal/eventbus/channel"
 	"github.com/improvtrace/stateflux/internal/obs"
+	"github.com/improvtrace/stateflux/internal/task"
 	"github.com/improvtrace/stateflux/internal/task/codec"
 )
 
@@ -44,9 +45,9 @@ type Request struct {
 	// Message 是任务信封（不可变）。
 	Message *taskv1.TaskMessage
 	// Delivery 是投递形态；空取默认。
-	Delivery config.Delivery
+	Delivery task.Delivery
 	// Semantics 是投递语义；空取默认。
-	Semantics config.Semantics
+	Semantics task.Semantics
 	// Target 是显式目标节点；零值时由约束选择。
 	Target cluster.Node
 	// DedupeKey 是 exactly_once 的入口去重键；空则回落到 idempotency_key / task_id。
@@ -137,11 +138,11 @@ func (d *Dispatcher) Deliver(ctx context.Context, req Request) (*Result, error) 
 	}
 	res := &Result{
 		TaskID:    req.Message.GetTaskId(),
-		Retryable: semantics != config.AtMostOnce,
+		Retryable: semantics != task.AtMostOnce,
 	}
 
 	// exactly_once：入口去重。Redis 不可用时返回错误——绝不静默放行重复投递（§15.3#2）。
-	if semantics == config.ExactlyOnce {
+	if semantics == task.ExactlyOnce {
 		key := req.DedupeKey
 		if key == "" {
 			key = req.Message.GetIdempotencyKey()
@@ -179,7 +180,7 @@ func (d *Dispatcher) Deliver(ctx context.Context, req Request) (*Result, error) 
 		if d.metrics != nil {
 			d.metrics.ErrorRecord(ctx, queue, "deliver")
 		}
-		if semantics == config.AtMostOnce {
+		if semantics == task.AtMostOnce {
 			// 至多一次：放弃重试，返回「已尝试」而非错误——由调用方决定是否记录。
 			return res, nil
 		}
@@ -187,7 +188,7 @@ func (d *Dispatcher) Deliver(ctx context.Context, req Request) (*Result, error) 
 	}
 	res.Accepted = true
 
-	if delivery == config.DeliverySyncRPC && len(resp.Payload) > 0 {
+	if delivery == task.DeliverySyncRPC && len(resp.Payload) > 0 {
 		ev := &taskv1.ResultEvent{}
 		if uerr := proto.Unmarshal(resp.Payload, ev); uerr == nil && ev.GetTaskId() != 0 {
 			res.Result = ev
@@ -195,7 +196,7 @@ func (d *Dispatcher) Deliver(ctx context.Context, req Request) (*Result, error) 
 	}
 
 	// 异步执行视图（best-effort 提示，失败不影响正确性，§15.1#9）。
-	if delivery == config.DeliveryRedisQueue {
+	if delivery == task.DeliveryRedisQueue {
 		_ = d.view.SetTaskState(ctx, cacheview.TaskState{
 			TaskID:  req.Message.GetTaskId(),
 			Attempt: req.Message.GetAttempt(),
@@ -236,13 +237,13 @@ func (d *Dispatcher) ResolveTarget(msg *taskv1.TaskMessage) (cluster.Node, error
 
 // buildEnvelope 依据投递形态编码载荷：同步走 protobuf 直传，异步走 machinery 风格的
 // 签名化 codec（§15.1#13）。
-func (d *Dispatcher) buildEnvelope(queue string, delivery config.Delivery, req Request, target cluster.Node) (channel.Envelope, error) {
+func (d *Dispatcher) buildEnvelope(queue string, delivery task.Delivery, req Request, target cluster.Node) (channel.Envelope, error) {
 	var (
 		payload []byte
 		err     error
 	)
 	switch delivery {
-	case config.DeliverySyncRPC:
+	case task.DeliverySyncRPC:
 		payload, err = proto.Marshal(req.Message)
 	default:
 		payload, err = d.codec.Encode(req.Message)

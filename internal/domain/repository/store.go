@@ -81,36 +81,6 @@ type BatchProgress struct {
 	InFlight int
 }
 
-// Processing 是在途任务行的只读投影（§3.1/§5.2）：只携带调度、分发与观测所需字段，避免把
-// ent 实体泄漏进组合根契约。Claim 与 GetProcessing 都返回它。
-type Processing struct {
-	TaskID         int64
-	Type           string
-	Operator       string
-	Priority       schema.Priority
-	Channel        string
-	TimeoutMs      int64
-	MaxAttempts    int32
-	Attempt        int64 // 本次认领后的 attempts，即执行 fence（§5.5/§6.2）
-	ClaimedNode    string
-	IdempotencyKey string
-	Callback       json.RawMessage
-	ParentTaskID   int64
-	Vpc            string
-	Node           string
-	Label          string
-	HashBucket     int16
-	BizRaceLabels  []string
-	BizRaceEntry   string
-	BizGroup       string
-	BizBatchID     string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-}
-
-// Claimed 是 Processing 的别名，强调该行来自 claim 挪行（§5.2）。
-type Claimed = Processing
-
 // EnqueueRequest 是一次创建请求（§5.1）：公共段字段 + payload。TaskID 由调用方以雪花生成；
 // IdempotencyKey 为空时跳过身份账本（不去重），否则由 task_identities 裁决幂等。
 type EnqueueRequest struct {
@@ -149,17 +119,6 @@ type CompleteRequest struct {
 	TaskID      int64
 	Attempt     int64
 	Outcome     schema.Outcome
-	Result      json.RawMessage
-	Error       string
-	CompletedAt time.Time
-}
-
-// Result 是 task_results 的只读投影（§5.5）：payload 与业务结果在终态事务内合并入行。
-type Result struct {
-	TaskID      int64
-	Outcome     schema.Outcome
-	Attempt     int64
-	Payload     json.RawMessage
 	Result      json.RawMessage
 	Error       string
 	CompletedAt time.Time

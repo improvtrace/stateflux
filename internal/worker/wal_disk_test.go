@@ -20,8 +20,11 @@ func TestDiskWALReplayAndCompact(t *testing.T) {
 	if w.Len() != 2 {
 		t.Fatalf("len = %d, want 2", w.Len())
 	}
-	if w.Bytes() != 1 {
-		t.Fatalf("bytes = %d, want 1", w.Bytes())
+	// 字节水位按整条事件的 protobuf 编码大小计（§10），而非仅业务结果字段。
+	want := walEntryBytes(&taskv1.ResultEvent{TaskId: 1, Attempt: 1, Result: []byte("a")}) +
+		walEntryBytes(&taskv1.ResultEvent{TaskId: 3, Attempt: 1})
+	if w.Bytes() != want {
+		t.Fatalf("bytes = %d, want %d", w.Bytes(), want)
 	}
 	if err := w.Close(); err != nil {
 		t.Fatalf("close: %v", err)

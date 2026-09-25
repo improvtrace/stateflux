@@ -9,7 +9,6 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	taskv1 "github.com/improvtrace/stateflux/api/stateflux/task/v1"
-	bizcoherence "github.com/improvtrace/stateflux/internal/biz/coherence"
 	"github.com/improvtrace/stateflux/internal/cluster"
 	"github.com/improvtrace/stateflux/internal/domain/cacheview"
 	"github.com/improvtrace/stateflux/internal/eventbus"
@@ -69,7 +68,7 @@ func (p *ResultPublisher) Publish(ctx context.Context, ev *taskv1.ResultEvent) e
 		Payload: payload,
 	}
 	if p.nodes != nil {
-		if sched, ok := p.nodes.Node(bizcoherence.SchedulerNodeID(p.nodes)); ok {
+		if sched, ok := p.nodes.Node(p.nodes.SchedulerNodeID()); ok {
 			env.Target = sched.Address
 		}
 	}

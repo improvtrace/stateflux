@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"path/filepath"
 	"sync"
@@ -21,7 +22,6 @@ import (
 	bizworker "github.com/improvtrace/stateflux/internal/biz/worker"
 	"github.com/improvtrace/stateflux/internal/cluster"
 	"github.com/improvtrace/stateflux/internal/config"
-	"github.com/improvtrace/stateflux/internal/domain"
 	"github.com/improvtrace/stateflux/internal/domain/cacheview"
 	"github.com/improvtrace/stateflux/internal/domain/data"
 	"github.com/improvtrace/stateflux/internal/domain/repository"
@@ -40,6 +40,8 @@ import (
 	"github.com/improvtrace/stateflux/internal/task/dispatch"
 	"github.com/improvtrace/stateflux/internal/task/factory"
 	"github.com/improvtrace/stateflux/internal/worker"
+	"github.com/improvtrace/stateflux/pkg/idgen"
+	"github.com/improvtrace/stateflux/pkg/transport"
 	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
 )
@@ -55,7 +57,7 @@ const (
 )
 
 // provideDialer 提供共享 gRPC 连接池。
-func provideDialer() *rpc.Dialer { return rpc.NewDialer() }
+func provideDialer() *transport.Dialer { return transport.NewDialer() }
 
 // provideClusterView 按 config.Cluster 构造集群视图客户端（§15.1#3）。
 func provideClusterView(cfg config.Config) (cluster.View, error) {
@@ -101,7 +103,7 @@ func provideCacheView(cfg config.Config, d *data.Data) (cacheview.View, error) {
 // 队列↔节点映射表（由任务异步执行视图的队列路由反查），并按 ChannelSpec.Kind 惰性创建
 // channel。默认/同步/结果流与内存 fake 仍预注册为静态通道，保持既有语义；其余队列名
 // （task 行 channel 列）在首次订阅/发送时按需创建。
-func provideEventBus(cfg config.Config, d *data.Data, dialer *rpc.Dialer, cache cluster.ClusterCacheView, routes cacheview.View) (*eventbus.EventBus, error) {
+func provideEventBus(cfg config.Config, d *data.Data, dialer *transport.Dialer, cache cluster.ClusterCacheView, routes cacheview.View) (*eventbus.EventBus, error) {
 	if d == nil || d.Redis() == nil {
 		return nil, errors.New("server: redis client is required for eventbus channels")
 	}
@@ -160,13 +162,13 @@ func describeChannel(bus *eventbus.EventBus, name string) string {
 func provideMetrics() (*obs.Metrics, error) { return obs.New() }
 
 // provideStore 构造任务账本组合根（§3.1）：回调派生复用节点雪花，保证 ID 全局唯一（§5.6）。
-func provideStore(d *data.Data, ids *domain.Snowflake) repository.Store {
+func provideStore(d *data.Data, ids *idgen.Snowflake) repository.Store {
 	return data.NewStoreWithIDGenerator(d, ids.Next)
 }
 
 // provideSnowflake 构造任务 ID 生成器（§3.1：客户端雪花）。
-func provideSnowflake(nodeID string) *domain.Snowflake {
-	return domain.NewSnowflake(nodeID)
+func provideSnowflake(nodeID string) *idgen.Snowflake {
+	return idgen.NewSnowflake(nodeID)
 }
 
 // provideTaskRegistry 构造任务原型注册表并登记内置原型（§15.1#13）。
@@ -250,7 +252,7 @@ func provideWAL(cfg config.Config) worker.WAL {
 // ---- 转发 ----
 
 // provideForwarder 构造节点间转发客户端（§15.1#6）。
-func provideForwarder(cfg config.Config, nodeID string, dialer *rpc.Dialer, cache cluster.ClusterCacheView) *forward.Forwarder {
+func provideForwarder(cfg config.Config, nodeID string, dialer *transport.Dialer, cache cluster.ClusterCacheView) *forward.Forwarder {
 	return forward.NewForwarder(dialer, cache, nodeID, cfg.Dispatch.MaxHops)
 }
 
@@ -300,7 +302,7 @@ func provideCoherenceServer(store *bizcoherence.CoherenceStore, view cacheview.V
 }
 
 // provideCoherenceSyncer 构造调度侧共识同步器：分配全部 WorkerQueues。
-func provideCoherenceSyncer(cfg config.Config, nodeID string, store *bizcoherence.CoherenceStore, cache cluster.ClusterCacheView, dialer *rpc.Dialer, metrics *obs.Metrics) *bizcoherence.CoherenceSyncer {
+func provideCoherenceSyncer(cfg config.Config, nodeID string, store *bizcoherence.CoherenceStore, cache cluster.ClusterCacheView, dialer *transport.Dialer, metrics *obs.Metrics) *bizcoherence.CoherenceSyncer {
 	pusher := bizcoherence.NewCoherencePusher(dialer, cache, cfg.Dispatch.Timeout)
 	return bizcoherence.NewCoherenceSyncer(bizcoherence.CoherenceSyncerOptions{
 		Store:     store,
@@ -314,7 +316,7 @@ func provideCoherenceSyncer(cfg config.Config, nodeID string, store *bizcoherenc
 }
 
 // provideCoherencePuller 构造执行侧共识拉取器（§15.1#4）。
-func provideCoherencePuller(cfg config.Config, nodeID string, store *bizcoherence.CoherenceStore, cache cluster.ClusterCacheView, dialer *rpc.Dialer, view cacheview.View, metrics *obs.Metrics) *bizcoherence.CoherencePuller {
+func provideCoherencePuller(cfg config.Config, nodeID string, store *bizcoherence.CoherenceStore, cache cluster.ClusterCacheView, dialer *transport.Dialer, view cacheview.View, metrics *obs.Metrics) *bizcoherence.CoherencePuller {
 	return bizcoherence.NewCoherencePuller(bizcoherence.CoherencePullerOptions{
 		Store:    store,
 		View:     view,
@@ -455,13 +457,15 @@ func provideFactoryRegistry(cfg config.Config) (*factory.Registry, error) {
 	return reg, nil
 }
 
-// provideFactoryManager 构造工厂运行器。
+// provideFactoryManager 构造工厂运行器：周期生成失败经日志告警（不阻塞下一周期）。
 func provideFactoryManager(reg *factory.Registry, e *biztask.Enqueuer) *factory.Manager {
-	return factory.NewManager(reg, e.Sink())
+	return factory.NewManager(reg, e.Sink()).WithOnError(func(name string, err error) {
+		log.Printf("stateflux: [factory] %s: %v", name, err)
+	})
 }
 
 // provideEnqueuer 构造入队器（§5.1）。
-func provideEnqueuer(store repository.Store, ids *domain.Snowflake, cfg config.Config) *biztask.Enqueuer {
+func provideEnqueuer(store repository.Store, ids *idgen.Snowflake, cfg config.Config) *biztask.Enqueuer {
 	return biztask.NewEnqueuer(store, ids, ChannelDefault)
 }
 

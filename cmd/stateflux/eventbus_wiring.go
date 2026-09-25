@@ -11,6 +11,7 @@ import (
 	"github.com/improvtrace/stateflux/internal/eventbus/channel/mem"
 	redischan "github.com/improvtrace/stateflux/internal/eventbus/channel/redis"
 	"github.com/improvtrace/stateflux/internal/eventbus/channel/rpc"
+	"github.com/improvtrace/stateflux/pkg/transport"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -19,7 +20,7 @@ import (
 // 轻量包装；RPC 形态共享同一连接池 dialer。
 type channelFactory struct {
 	redis   redis.UniversalClient
-	dialer  *rpc.Dialer
+	dialer  *transport.Dialer
 	timeout time.Duration
 	ropts   redischan.Options
 }
