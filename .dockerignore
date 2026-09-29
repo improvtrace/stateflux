@@ -1,7 +1,9 @@
 .git
 .docs
 .zcode
-build
+bin
+dist
+.stateflux-wal
 hack
 internal/test
 stateflux

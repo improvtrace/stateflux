@@ -55,7 +55,8 @@ pkg/
 └── idgen/                      # 雪花任务 ID（bwmarrin/snowflake 封装：固定 epoch + 节点位哈希策略）
 internal/
 ├── server/                     # App 装配与生命周期、健康检查、选举门控
-├── cluster/                    # ClusterView：local / http(s) / grpc 客户端 + 缓存与权限推导
+├── cluster/                    # ClusterView：local / http(s) / grpc 客户端 + 缓存与权限推导 + Query/Describe（info 子命令）
+│   └── mockserver/             #   外置集群服务本地单机模拟（cluster 子命令实现）：gRPC+HTTP 双面、主机派生固定节点 ID
 ├── eventbus/                   # EventBus（懒创建、WithChannel）+ channel/{rpc,redis,mem}
 ├── task/                       # Task/Registry + 投递语义枚举 + codec + factory + dispatch
 ├── worker/                     # handler/capability 注册 + 执行运行时（WAL，先写后发）
@@ -69,7 +70,7 @@ internal/
 ├── domain/                     # ent schema / repository（自有仓储实体）/ data（PG+Redis，ent↔实体转换）/ cacheview / migration
 ├── config/                     # 配置与默认值（viper）
 └── obs/                        # OTel 指标/链路装配（默认关闭）
-cmd/                            # main（cobra）+ serve 子命令 + wire 装配
+cmd/                            # main（cobra）+ serve/cluster/info 子命令 + wire 装配
 build/                          # Dockerfile + docker-compose（PG/Redis）
 hack/                           # dev.sh（中间件起停、迁移）
 ```
@@ -87,33 +88,207 @@ make api        # proto 生成码（需要 protoc ≥ 25 及 protoc-gen-go / pro
 
 ```bash
 hack/dev.sh up        # docker compose 启动 PostgreSQL 16(5432) + Redis 7(6379)，账号/库名均为 stateflux
-hack/dev.sh migrate   # 按序应用 internal/domain/migration/*.sql（不会自动迁移，升级时需手动执行）
+hack/dev.sh migrate   # dist/bin/stateflux migrate：版本化迁移（幂等，见「版本与迁移」）
 ```
 
 构建并启动单机节点（默认 DSN 即指向上述本地 PG/Redis）：
 
 ```bash
 make build
-./bin/stateflux serve --cluster-dsn local:// --grpc-addr 127.0.0.1:9090 --http-addr 127.0.0.1:9091
+dist/bin/stateflux serve --cluster-dsn local:// --grpc-addr 127.0.0.1:9090 --http-addr 127.0.0.1:9091
 ```
 
 接入外部集群视图（多节点部署，由外部系统实现 `cluster.v1.ClusterService`）：
 
 ```bash
-./bin/stateflux serve --cluster-dsn 'grpc://10.0.0.5:9090?timeout=10s&connect_timeout=30s&interval=3s'
-./bin/stateflux serve --cluster-dsn 'http://10.0.0.5:8080?interval=3s'
+dist/bin/stateflux serve --cluster-dsn 'grpc://10.0.0.5:9090?timeout=10s&connect_timeout=30s&interval=3s'
+dist/bin/stateflux serve --cluster-dsn 'http://10.0.0.5:8080?interval=3s'
 ```
 
 DSN 参数（URL query）：`timeout`（单次调用预算，默认 10s）、`connect_timeout`（默认 30s）、
 `interval`（视图缓存刷新周期，默认 3s，`0` 表示仅按需拉取）；`local://` 另支持
 `node_id` / `address` 覆盖内置节点。
 
+### 本地模拟外部集群（cluster 子命令）
+
+没有真实的外部选举/成员系统时，用 `stateflux cluster` 起一个本地单机 mock：同时监听
+gRPC（`127.0.0.1:9190`）与 HTTP/JSON（`127.0.0.1:9191`），serve 侧以任一协议 DSN
+接入即可（实现全部在 `internal/cluster/mockserver`，§15.1#3）。**单机定位**：仅供
+serve 单机部署测试，不内置成员同步/共识——多实例各自独立、视图不互通。
+
+```bash
+# 默认单节点视图：主机信息派生的固定节点 ID（见下），primary/leader，
+# 地址指向 serve 默认 gRPC 监听 127.0.0.1:9090
+dist/bin/stateflux cluster
+
+# serve 接入 mock（二选一）
+dist/bin/stateflux serve --cluster-dsn grpc://127.0.0.1:9190
+dist/bin/stateflux serve --cluster-dsn http://127.0.0.1:9191
+```
+
+**默认节点 ID 由主机信息派生（固定）**：`node-<hostname>-<hash8>`——hostname 归一
+为 `[a-z0-9-]`，叠加 machine-id（不可读时退回首个非环回网卡 MAC）做 FNV 哈希短
+后缀。同一主机跨重启恒定，serve 单机联调因此保持稳定的节点身份（选举归属、任务
+归属都携带节点 ID）；不同主机天然不撞名。显式 `--node` / `--self` 声明优先于派生值。
+
+多节点视图与身份：`--node` 可重复声明节点（`id=<id>[,address=<host:port>][,vpc=<vpc>]
+[,labels=<a;b>][,roles=<primary;standby>][,online=<bool>][,leader=<bool>]`）；`--self`
+是上报给调用方的「本节点身份」（`ClusterInfoResponse.node_id`，serve 以它作为自身
+身份参与选举归属判断），缺省取启动时的 leader。mock 无法区分调用方，多个 serve
+共用同一 mock 会共享身份，适合单节点联调。
+
+```bash
+dist/bin/stateflux cluster --self node-1 \
+    --node id=node-1,address=127.0.0.1:9090,roles=primary,leader=true \
+    --node id=node-2,address=127.0.0.1:9092,roles=standby
+
+# 故障切换演练：运行期切换 leader，serve 在下一个视图刷新周期（默认 3s）接管
+curl -X POST http://127.0.0.1:9191/admin/leader -d '{"node_id":"node-2"}'
+```
+
+HTTP 面另提供 `/healthz` / `/readyz`；gRPC 面注册了 server reflection，可直接用
+grpcurl 排障。SIGINT/SIGTERM 优雅退出。
+
+除 flag 外，`cluster` 子命令同样支持 `--config` 配置文件与 `STATEFLUX_*` 环境变量
+（`cluster.mock_server` 段，优先级同 serve：默认值 → 文件 → 环境变量 → flag）：
+
+```yaml
+cluster:
+  mock_server:
+    grpc_addr: 127.0.0.1:9190
+    http_addr: 127.0.0.1:9191
+    self: node-1
+    nodes:
+      - "id=node-1,address=127.0.0.1:9090,roles=primary,leader=true"
+      - "id=node-2,address=127.0.0.1:9092,roles=standby"
+```
+
+### 集群视图查询（info 子命令）
+
+`stateflux info` 只读拉取一份集群视图并打印**全部信息**，不启动任何监听：输出首行
+是本二进制的构建信息（`build: version=... commit=... builddate=... goversion=...`，
+编译注入，与 `--version` 同源），随后是上报身份、调度节点、每个
+节点的地址 / vpc / 标签 / 角色 / 推导权限 / 在线与 leader 状态。
+目标经 `--cluster-dsn` 指定，语义与 serve 完全一致（`local://` 静态视图、
+`grpc://host:port`、`http://host[:port]`，`timeout` / `connect_timeout` 走 URL
+query）；缺省取配置的 `cluster.dsn`（默认 `local://localhost`），同样支持
+`--config` 文件与环境变量。查询走的正是 serve 侧的消费路径客户端
+（`internal/cluster.Query`）：
+
+```bash
+# 默认：local 静态单节点视图
+stateflux info
+
+# 查询 mock 集群服务
+stateflux info --cluster-dsn grpc://127.0.0.1:9190
+stateflux info --cluster-dsn 'http://127.0.0.1:9191?timeout=2s'
+```
+
+
 ## 配置
 
-装载优先级：**默认值 → 配置文件（`serve --config <file>`，yaml/toml/json 等）→ `STATEFLUX_*`
-环境变量 → 命令行 flag**。命令行 flag 仅 `--config`、`--pg-dsn`、`--redis-addrs`、`--cluster-dsn`、
-`--grpc-addr`、`--http-addr`；其余经环境变量或配置文件调整（`STATEFLUX_` 前缀，路径 `.` → `_`，
+装载优先级：**默认值 → 配置文件（`--config <file>`，yaml/toml/json 等）→ `STATEFLUX_*`
+环境变量 → 命令行 flag**（serve / cluster / info 子命令同规则；cluster 读
+`cluster.mock_server` 段、info 读 `cluster.dsn`，见上文）。serve 的命令行 flag 仅 `--config`、
+`--pg-dsn`、`--redis-addrs`、`--cluster-dsn`、`--grpc-addr`、`--http-addr`；其余经环境变量或
+配置文件调整（`STATEFLUX_` 前缀，路径 `.` → `_`，
 如 `runtime.wal_dir` → `STATEFLUX_RUNTIME_WAL_DIR`；列表用逗号分隔）。
+
+仓库自带一份全节点共用的模板配置 [internal/config/config.yaml](./internal/config/config.yaml)
+（也是 `make install` 安装包内的 `config.yaml`）：所有节点下发**同一份**，`cluster.dsn` 指向
+**本机**外置集群服务（`grpc://127.0.0.1:9190`，每台机器用同一文件运行 `stateflux cluster`，
+节点身份由主机信息派生、天然不撞名）；`pg` / `redis` 指向**共享**实例，部署时按环境改好后
+统一下发，节点级临时差异用环境变量 / flag 覆盖。
+
+### 构建产物与安装包
+
+三个构建目标统一输出到 `dist/` 下各子目录，产物文件名均含 version。version 的唯一
+来源是 [build/version](./build/version) 版本历史文件（每行 `${alias}.${major}.${minor}`
+如 `chronos.0.1`，末行为当前版本），经 `go:embed` 嵌入二进制（根包 `embed.go`）——
+因此**产物名里的 version 与二进制 `--version` / `stateflux info` 报告的 version 始终
+一致**，且不受构建环境（git / CI）影响；commit / builddate 仍为编译注入：
+
+| 目标 | 产物 | 说明 |
+| --- | --- | --- |
+| `make build` | `dist/bin/stateflux` | 本地开发二进制（同样带构建信息） |
+| `make install` | `dist/package/stateflux-<version>-<os>-<arch>.tar.gz` | 离线安装包（可交叉编译） |
+| `make docker` | `dist/image/stateflux_<version>_linux_<arch>.tar.gz` | Docker 镜像（tag `stateflux:<version>` 及 `latest`，`docker save` 导出） |
+
+安装包部署（解压后 `sudo ./install.sh` 安装到 `/usr/local/stateflux`）：
+
+```bash
+make install
+mkdir -p /tmp/stateflux && tar -xzf dist/package/stateflux-*.tar.gz -C /tmp/stateflux
+cd /tmp/stateflux && sudo ./install.sh   # 安装到 /usr/local/stateflux
+```
+
+**包内布局与安装后目录保持一致**（除三个脚本外即 `/usr/local/stateflux` 的内容）：
+`install.sh`（安装）、`upgrade.sh`（升级）、`downgrade.sh`（降级，在旧版本包内执行）、
+`bin/stateflux`（静态二进制，`CGO_ENABLED=0`）、`conf/config.yaml`（全节点共用配置）、
+`VERSION`（构建信息）。
+`install.sh` 幂等（重复执行视为升级），安装布局：
+
+```text
+/usr/local/stateflux/
+├── bin/stateflux      # 二进制（符号链接到 /usr/local/bin/stateflux）
+├── conf/config.yaml   # 配置文件
+├── dumps/             # 升级/降级前的 pg_dump 备份（${timestamp}_${version}.dump）
+└── VERSION            # 构建信息
+```
+
+`conf/config.yaml` 视为节点本地状态：已存在时**不覆盖**（包内新版差异旁路保存为
+`conf/config.yaml.new`，人工确认合并）；旧版平铺布局（`$PREFIX/stateflux`、
+`$PREFIX/config.yaml`）自动迁移；安装位置可经 `PREFIX=... ./install.sh` 覆盖。
+每个节点安装后按序初始化与启动：
+
+```bash
+stateflux migrate --config /usr/local/stateflux/conf/config.yaml  # 0) 初始化 PG（幂等）
+stateflux cluster --config /usr/local/stateflux/conf/config.yaml  # 1) 本机外置集群服务
+stateflux serve  --config /usr/local/stateflux/conf/config.yaml   # 2) 节点服务
+```
+
+Docker：`make docker` 走与 `make install` 同一条打包+安装路径（`build/docker.sh` →
+`build/Dockerfile` → `build/package.sh` → `install.sh`），镜像内即安装包部署后的
+`/usr/local/stateflux` 布局，默认 `CMD` 为带上述配置启动 serve（监听地址经环境变量
+放开为 `0.0.0.0`）；版本经 `--build-arg` 透传，镜像内二进制构建信息与镜像 tag 一致。
+
+### 版本与迁移
+
+版本历史 [build/version](./build/version)（嵌入二进制）每行一个版本
+`${alias}.${major}.${minor}`（如 `chronos.0.1`），行序即升级顺序；发新版本 = 追加
+一行 + 新增迁移文件。迁移文件位于 `internal/domain/migration/`，命名为
+`${version}_${date}`（如 `chronos.0.1_20260929`），同一名下 `.sql` 与 `.go` 可共存：
+SQL 为主（整文件单事务执行，支持 `$$` 函数体），Go 迁移用于 SQL 不便表达的部分、
+与同名 SQL 同事务在其后执行；全部 SQL 嵌入二进制，`stateflux migrate` 执行时自包含。
+当前 `chronos.0.1` 的初始化迁移由原 000001~000003 三个文件**合并为单个**
+`chronos.0.1_20260929.sql`（七表账本 + 挪行函数/索引 + 唤醒触发器）。
+
+PG 中维护 `version` 表：**每次升级（含首次安装）应用一个版本即插入一条
+`{id, version, date}`**，已记录的版本跳过，重复执行幂等。
+
+```bash
+stateflux migrate                                # 初始化 / 升级到嵌入历史的最新版本
+stateflux migrate --target chronos.0.1           # 升级到指定版本
+stateflux migrate --target chronos.0.1 --rebuild # 重建 schema 至指定版本（降级流程内部使用）
+stateflux migrate --generate chronos.0.2         # 开发期：同时生成该版本的 .sql + .go 迁移脚手架
+```
+
+升级用安装包内的 `upgrade.sh`，降级解压**旧版本安装包**执行其中的 `downgrade.sh`
+（用包内文件完整回退；两者都需 `pg_dump` / `pg_restore`）：
+
+```bash
+sudo ./upgrade.sh       # 升级（新包内）：dump 当前库 → 替换 bin/conf → stateflux migrate
+sudo ./downgrade.sh     # 降级（旧包内）：dump 当前库 → 替换回包内 bin/conf → rebuild → 回载该版本 dump
+```
+
+- 升级前自动 `pg_dump` 当前库到 `/usr/local/stateflux/dumps/${timestamp}_${version}.dump`，
+  再替换二进制与配置（旧配置带时间戳备份为 `conf/config.yaml.bak-<ts>`），最后执行
+  `stateflux migrate`（version 表记录新版本）；迁移失败时提示用该 dump 恢复。
+- 降级同样先 dump 当前库，然后用**旧版本包内**的 `bin/stateflux`、`conf/config.yaml`、
+  `VERSION` 替换已装文件（旧配置同样时间戳备份），`stateflux migrate --target <包版本>
+  --rebuild` 重建该版本 schema（不写 version 记录），最后以 `pg_restore --data-only`
+  加载该版本最近一份 dump（业务数据与 version 记录一并回填）——二进制、配置、数据库
+  全部回退。前提是 dumps/ 下留存过该版本的备份（每次升级 / 降级都会自动留）。
 
 | 环境变量 | 默认 | 说明 |
 | --- | --- | --- |
@@ -122,6 +297,9 @@ DSN 参数（URL query）：`timeout`（单次调用预算，默认 10s）、`co
 | `STATEFLUX_PG_MAX_OPEN_CONNS` / `_MAX_IDLE_CONNS` | `30` / `10` | 连接池 |
 | `STATEFLUX_REDIS_ADDRS` | `127.0.0.1:6379` | 逗号分隔；多个地址按 cluster 客户端连接 |
 | `STATEFLUX_CLUSTER_DSN` | `local://localhost` | 集群视图 DSN，见上文 |
+| `STATEFLUX_CLUSTER_MOCK_SERVER_GRPC_ADDR` / `_HTTP_ADDR` | `127.0.0.1:9190` / `127.0.0.1:9191` | `cluster` 子命令监听地址 |
+| `STATEFLUX_CLUSTER_MOCK_SERVER_SELF` | 空（取启动时 leader） | `cluster` 子命令上报的调用方身份 |
+| `STATEFLUX_CLUSTER_MOCK_SERVER_NODES` | 空（主机派生 ID 的默认单节点） | `cluster` 子命令节点规格串，逗号分隔（规格内用分号分隔列表） |
 | `STATEFLUX_SERVER_GRPC_ADDR` / `_HTTP_ADDR` | `127.0.0.1:9090` / `127.0.0.1:9091` | 监听地址 |
 | `STATEFLUX_SERVER_SHUTDOWN_TIMEOUT` | `10s` | 优雅退出总预算 |
 | `STATEFLUX_RUNTIME_SCHEDULER_TRIGGERS` | `tick` | 逗号分隔：`tick,notify,coherence,manual`，多个值 = 多个 Scheduler 实例 |
@@ -168,7 +346,9 @@ DSN 参数（URL query）：`timeout`（单次调用预算，默认 10s）、`co
 make api        # 生成 api/ 下 proto 的 Go 代码（protoc）
 make generate   # 生成 ent 代码（features: sql/upsert, sql/lock, sql/execquery）
 make wire       # 生成 wire 注入代码
-make build      # 构建 bin/stateflux（入口 ./cmd）
+make build      # 构建 dist/bin/stateflux（入口 ./cmd）
+make install    # 构建 dist/package/ 下 .tar.gz 安装包（见「构建产物与安装包」）
+make docker     # 构建 Docker 镜像并导出到 dist/image/（tag stateflux:<version>）
 make vet        # go vet ./...
 make fmt        # gofmt
 go test ./...   # 全量测试；internal/domain/data 下 *_it_test.go 为集成测试，需要本地 PG/Redis

@@ -13,3 +13,4 @@ api/**/*.pb.go
 
 # 构建产物
 /stateflux
+dist/

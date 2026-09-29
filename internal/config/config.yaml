@@ -1,0 +1,106 @@
+# stateflux 全节点共用配置（make install 打包为安装包内的 config.yaml）。
+#
+# 部署模型（§15.1#3）：所有节点下发**同一份**配置文件，不做逐节点差异化——
+#   - 每台机器上先起一个本机「外置集群服务」（stateflux cluster 子命令，读取本文件
+#     cluster.mock_server 段，监听 127.0.0.1:9190/9191），serve 经 cluster.dsn
+#     指向它：grpc://127.0.0.1:9190。节点身份由主机信息派生（node-<hostname>-<hash8>，
+#     同机恒定、异机不撞名），因此同一份配置在每个节点上都成立。
+#   - pg / redis 是**共享**基础设施：任务账本（PG，唯一权威）与分发通道（Redis）
+#     全集群一份，按环境把地址改成实际实例后统一下发。
+#   - 节点本地差异（DSN、监听地址等）如需临时覆盖，优先用 STATEFLUX_* 环境变量
+#     或命令行 flag，不改本文件（优先级：默认值 → 本文件 → 环境变量 → flag）。
+#
+# 字段与默认值逐一对应 internal/config/config.go 的 Default()； durations 用
+# Go 语法（10s / 100ms / 5m），字节数用整数。
+
+pg:
+  # 任务账本唯一权威存储；sslmode 按部署环境调整（云上内网可 disable，跨网建议 require）。
+  dsn: "postgres://stateflux:stateflux@127.0.0.1:5432/stateflux?sslmode=disable"
+  max_open_conns: 30
+  max_idle_conns: 10
+  conn_max_lifetime: 30m
+  conn_max_idle_time: 5m
+  # 固定 search_path，避免「用户名与 schema 同名」时隐式 $user schema 解析错位（§3.1）。
+  search_path: public
+
+redis:
+  # 仅作为 best-effort 通道（异步分发 / 去重窗口 / 共识 revision 缓存），
+  # 正确性不依赖 Redis；多地址 = cluster 客户端。
+  addrs:
+    - "127.0.0.1:6379"
+  # password: ""
+  # db: 0
+  dial_timeout: 5s
+  read_timeout: 3s
+  write_timeout: 3s
+  pool_size: 10
+  min_idle_conns: 0
+
+cluster:
+  # serve 的集群视图来源：指向**本机**外置集群服务（stateflux cluster 子命令）。
+  # query 参数：timeout（单次拉取）、connect_timeout（连接）、interval（视图缓存刷新）。
+  dsn: "grpc://127.0.0.1:9190?timeout=10s&connect_timeout=30s&interval=3s"
+  # 以下 mock_server 段仅 stateflux cluster 子命令消费（serve 忽略）：
+  # 每台机器用同一份配置起本机集群服务即可。
+  mock_server:
+    grpc_addr: "127.0.0.1:9190"
+    http_addr: "127.0.0.1:9191"
+    # self / nodes 留空 = 默认单节点视图：主机派生固定节点 ID、primary/leader、
+    # 地址 127.0.0.1:9090（与 server.grpc_addr 一致）。
+    # self: node-1
+    # nodes:
+    #   - "id=node-1,address=127.0.0.1:9090,roles=primary,leader=true"
+    #   - "id=node-2,address=127.0.0.1:9092,roles=standby"
+    shutdown_timeout: 10s
+
+server:
+  # serve 的 gRPC / HTTP 监听；127.0.0.1 与 mock 默认节点地址保持一致（本机视图
+  # 自洽：结果流、转发都指向本节点）。需要对外暴露时用环境变量覆盖为 0.0.0.0。
+  grpc_addr: "127.0.0.1:9090"
+  http_addr: "127.0.0.1:9091"
+  shutdown_timeout: 10s
+
+runtime:
+  # 调度触发器实例（可组合：tick,notify,coherence,manual）；控制面组件由选举门控
+  # 决定是否实际运行（SchedulerNodeID == self 且具备权限）。
+  scheduler_triggers:
+    - tick
+  enable_collector: true
+  enable_reconcile: true
+  claim_batch: 500
+  tick_interval: 100ms
+  promote_interval: 200ms
+  reconcile_interval: 10s
+  # processing 超过该时长视为失联（R1 重派），同时作为执行超时。
+  dispatch_grace: 90s
+  # 执行节点初始订阅队列；coherence 路由生效后被动态覆盖。
+  worker_queues:
+    - default
+  # 内置示例工厂生成周期；生产可置 0 关闭。
+  factory_interval: 30s
+  # 结果 WAL 目录（worker 先写后发）；相对路径相对进程工作目录。
+  wal_dir: ".stateflux-wal"
+  wal_max_entries: 10000
+  wal_max_bytes: 268435456 # 256MB
+
+dispatch:
+  default_semantics: at_least_once # at_most_once / exactly_once
+  default_delivery: redis_queue    # sync_rpc
+  forward: true
+  max_hops: 3
+  timeout: 10s
+  # exactly_once 入口去重窗口（依赖 Redis）。
+  dedupe_window: 10m
+  # 结果归集通道：stream（gRPC ResultStream）/ redis-pubsub / redis-list。
+  result_channel: stream
+
+coherence:
+  queue_prefix: "stateflux:queue:"
+  sync_interval: 10s
+  revision_ttl: 5m
+
+obs:
+  enabled: false
+  service_name: stateflux
+  # otlp_endpoint: "otel-collector:4317"
+  insecure: true
