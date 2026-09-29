@@ -72,6 +72,8 @@ install:
 # 构建并导出 Docker 镜像（build/docker.sh）：tag stateflux:<version>（附 latest），
 # 镜像内走与 install 相同的打包+安装路径；导出 $(DIST_DIR)/image/ 下含 version 的
 # tar.gz（docker save）。镜像平台固定 linux，GOARCH 决定架构。
+# 运行时基础镜像默认 alpine:3.22（Docker Hub 可达）；网络可达 gcr.io 时可换 distroless：
+#   make docker RUNTIME_IMAGE=gcr.io/distroless/static-debian12:nonroot
 docker:
 	./build/docker.sh $(GOARCH) $(DIST_DIR)/image
 

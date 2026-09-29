@@ -251,6 +251,9 @@ Docker：`make docker` 走与 `make install` 同一条打包+安装路径（`bui
 `build/Dockerfile` → `build/package.sh` → `install.sh`），镜像内即安装包部署后的
 `/usr/local/stateflux` 布局，默认 `CMD` 为带上述配置启动 serve（监听地址经环境变量
 放开为 `0.0.0.0`）；版本经 `--build-arg` 透传，镜像内二进制构建信息与镜像 tag 一致。
+运行时基础镜像默认 `alpine:3.22`（Docker Hub 可达，自带 CA 证书包；二进制为纯静态
+无 libc 依赖）；网络可达 gcr.io 时可换 distroless 收敛攻击面：
+`make docker RUNTIME_IMAGE=gcr.io/distroless/static-debian12:nonroot`。
 
 ### 版本与迁移
 

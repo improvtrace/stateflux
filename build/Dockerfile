@@ -4,6 +4,11 @@
 # 构建上下文为仓库根：docker build -f build/Dockerfile -t stateflux .（或 make docker）。
 
 # syntax=docker/dockerfile:1
+# 运行时基础镜像可覆盖（二进制为 CGO_ENABLED=0 纯静态，无 libc 依赖）：
+# 默认 alpine（Docker Hub 可达，自带 ca-certificates-bundle）；网络可达 gcr.io 时可换
+# distroless 进一步收敛攻击面：
+#   make docker RUNTIME_IMAGE=gcr.io/distroless/static-debian12:nonroot
+ARG RUNTIME_IMAGE=alpine:3.22
 FROM golang:1.27 AS build
 # 受限网络（proxy.golang.org 不可达）可覆盖：--build-arg GOPROXY=https://goproxy.cn,direct
 ARG GOPROXY=""
@@ -30,7 +35,7 @@ RUN ./build/package.sh "${TARGETOS}" "${TARGETARCH}" /out \
 	&& PREFIX=/usr/local/stateflux BIN_LINK_DIR=/usr/local/bin /tmp/pkg/install.sh \
 	&& install -d -m 0755 -o 65532 -g 65532 /var/lib/stateflux
 
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM ${RUNTIME_IMAGE}
 COPY --from=build /usr/local/stateflux /usr/local/stateflux
 # --chown 显式指定：源目录为空时 COPY --from 不保留源属主，需强制归 nonroot（65532）
 COPY --from=build --chown=65532:65532 /var/lib/stateflux /var/lib/stateflux
@@ -40,6 +45,7 @@ ENV STATEFLUX_SERVER_GRPC_ADDR=0.0.0.0:9090 \
 	STATEFLUX_SERVER_HTTP_ADDR=0.0.0.0:9091
 WORKDIR /var/lib/stateflux
 EXPOSE 9090 9091 9190 9191
-USER nonroot
+# 数值 uid：alpine 无 nonroot 用户名，distroless nonroot 即 65532，两者通用。
+USER 65532
 ENTRYPOINT ["/usr/local/stateflux/bin/stateflux"]
 CMD ["serve", "--config", "/usr/local/stateflux/conf/config.yaml"]

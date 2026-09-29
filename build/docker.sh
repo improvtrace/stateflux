@@ -10,7 +10,9 @@
 # 用法：build/docker.sh [arch] [输出目录]（缺省为当前架构、dist/image；
 #       镜像平台固定 linux，交叉示例：build/docker.sh arm64 dist/image）
 # 环境变量：DOCKER 覆盖 docker 命令；GOPROXY 透传给镜像内 go mod download /
-#       go build（缺省取宿主 go env GOPROXY）。
+#       go build（缺省取宿主 go env GOPROXY）；RUNTIME_IMAGE 覆盖运行时基础镜像
+#       （缺省 alpine:3.22，网络可达 gcr.io 时可换
+#        gcr.io/distroless/static-debian12:nonroot 收敛攻击面）。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -32,6 +34,7 @@ GOPROXY_ARG="${GOPROXY:-$(go env GOPROXY)}"
 	--build-arg COMMIT="$COMMIT" \
 	--build-arg BUILD_DATE="$BUILD_DATE" \
 	--build-arg GOPROXY="$GOPROXY_ARG" \
+	${RUNTIME_IMAGE:+--build-arg RUNTIME_IMAGE="$RUNTIME_IMAGE"} \
 	-t "stateflux:${VERSION}" \
 	-t stateflux:latest \
 	-f build/Dockerfile .
