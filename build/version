@@ -1,0 +1,7 @@
+# 版本历史：每行一个版本，格式 ${alias}.${major_version}.${minor_version}
+# （alias 为版本别名，major/minor 为数字，如 chronos.0.1）。
+# 本文件经 go:embed 嵌入二进制（根包 embed.go），是版本的唯一事实来源：
+# 产物命名（dist/package、dist/image）、二进制 --version / stateflux info、
+# 迁移版本序列（internal/domain/migration）均以末行为当前版本、以行序为升级顺序。
+# 发新版本：追加一行 + 新增 ${version}_${date}.sql/.go 迁移文件。
+chronos.0.1

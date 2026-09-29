@@ -96,6 +96,30 @@ const (
 type Cluster struct {
 	// DSN 集群视图数据源名称；空等价于 local://localhost。
 	DSN string `mapstructure:"dsn"`
+	// MockServer 是 stateflux cluster 子命令（外置集群服务本地模拟）的启动配置；
+	// 仅该子命令消费，serve 忽略。
+	MockServer MockServer `mapstructure:"mock_server"`
+}
+
+// MockServer 是 stateflux cluster 子命令（外置集群服务本地单机模拟）的启动配置
+// （§15.1#3）：字段语义与 internal/cluster/mockserver.Config 对齐；节点规格串是
+// mockserver 的私有语法，延迟到装配期经 mockserver.ParseNodeSpec 解析——依赖方向
+// 保持 mockserver → config 单向（config 不 import mockserver）。监听地址缺省由
+// mockserver.Normalize 补全。
+type MockServer struct {
+	// GRPCAddr gRPC 面监听地址（cluster.v1.ClusterService）；空用 mockserver.DefaultGRPCAddr。
+	GRPCAddr string `mapstructure:"grpc_addr"`
+	// HTTPAddr HTTP 面监听地址（GetClusterInfo JSON / 健康检查 / 管理端点）；
+	// 空用 mockserver.DefaultHTTPAddr。
+	HTTPAddr string `mapstructure:"http_addr"`
+	// Self 上报给调用方的本节点身份（ClusterInfoResponse.node_id，serve 以它
+	// 参与选举归属判断）；空 = 启动时 leader。
+	Self string `mapstructure:"self"`
+	// Nodes 节点规格串列表（mockserver.ParseNodeSpec 语法）；空 = 默认单节点
+	// 视图（节点 ID 由主机信息派生，见 mockserver.DefaultNodeID）。
+	Nodes []string `mapstructure:"nodes"`
+	// ShutdownTimeout 优雅退出预算；<= 0 用 server.DefaultShutdownTimeout。
+	ShutdownTimeout time.Duration `mapstructure:"shutdown_timeout"`
 }
 
 // ClusterOptions 是 ParseClusterDSN 的解析结果：连接与调用参数的单一来源，
@@ -289,7 +313,12 @@ func Default() Config {
 			ReadTimeout:  3 * time.Second,
 			WriteTimeout: 3 * time.Second,
 		},
-		Cluster: Cluster{DSN: "local://localhost"},
+		// MockServer 显式给空切片：flatten 后注册 cluster.mock_server.nodes key，
+		// AutomaticEnv 才能命中对应环境变量。
+		Cluster: Cluster{
+			DSN:        "local://localhost",
+			MockServer: MockServer{Nodes: []string{}},
+		},
 		Server: Server{
 			GRPCAddr:        "127.0.0.1:9090",
 			HTTPAddr:        "127.0.0.1:9091",
@@ -359,6 +388,21 @@ func BindFlags(v *viper.Viper, fs *pflag.FlagSet) {
 	bind("cluster.dsn", "cluster-dsn")
 	bind("server.grpc_addr", "grpc-addr")
 	bind("server.http_addr", "http-addr")
+}
+
+// BindMockServerFlags 把 cluster 子命令的 flag 绑定到 viper key（语义同 BindFlags；
+// 与 serve 的同名 flag 分属不同命令各自的 viper 实例，互不干扰）。
+func BindMockServerFlags(v *viper.Viper, fs *pflag.FlagSet) {
+	bind := func(key, name string) { _ = v.BindPFlag(key, fs.Lookup(name)) }
+	bind("cluster.mock_server.grpc_addr", "grpc-addr")
+	bind("cluster.mock_server.http_addr", "http-addr")
+	bind("cluster.mock_server.self", "self")
+	bind("cluster.mock_server.nodes", "node")
+}
+
+// BindInfoFlags 把 info 子命令的 flag 绑定到 viper key（语义同 BindFlags）。
+func BindInfoFlags(v *viper.Viper, fs *pflag.FlagSet) {
+	_ = v.BindPFlag("cluster.dsn", fs.Lookup("cluster-dsn"))
 }
 
 // FromViper 把 viper 实例解码为 Config：AllSettings 已合并默认值、配置文件、
