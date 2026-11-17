@@ -30,6 +30,13 @@ type Metrics struct {
 	CollectorResults metric.Int64Counter
 	ReconcileResets  metric.Int64Counter
 
+	// ---- 调度周期（吞吐与跳过原因：调度停摆/积压在指标面的最小可观测集） ----
+	// stateflux.scheduler.cycle —— 单轮各阶段计数（phase = promoted/claimed/dispatched/error）。
+	SchedulerCycle metric.Int64Counter
+	// stateflux.scheduler.skips —— 认领后未能分发的任务数（reason = payload/deliver/
+	// not_accepted/deadletter/deadletter_error）。
+	SchedulerSkips metric.Int64Counter
+
 	// ---- worker 水位（§6.4） ----
 	WALBacklogEntries metric.Int64Gauge
 	WALBacklogBytes   metric.Int64Gauge
@@ -85,6 +92,14 @@ func New() (*Metrics, error) {
 		}},
 		{func(mm metric.Meter) (err error) {
 			m.ReconcileResets, err = mm.Int64Counter("stateflux.reconcile.resets")
+			return
+		}},
+		{func(mm metric.Meter) (err error) {
+			m.SchedulerCycle, err = mm.Int64Counter("stateflux.scheduler.cycle")
+			return
+		}},
+		{func(mm metric.Meter) (err error) {
+			m.SchedulerSkips, err = mm.Int64Counter("stateflux.scheduler.skips")
 			return
 		}},
 		{func(mm metric.Meter) (err error) {
@@ -185,6 +200,23 @@ func (m *Metrics) ResetCount(ctx context.Context, reason string, n int64) {
 		return
 	}
 	m.ReconcileResets.Add(ctx, n, metric.WithAttributes(attribute.String("reason", reason)))
+}
+
+// SchedulerCycleRecord 调度周期各阶段计数（phase ∈ promoted/claimed/dispatched/error）。
+func (m *Metrics) SchedulerCycleRecord(ctx context.Context, phase string, n int64) {
+	if m == nil || m.SchedulerCycle == nil || n <= 0 {
+		return
+	}
+	m.SchedulerCycle.Add(ctx, n, metric.WithAttributes(attribute.String("phase", phase)))
+}
+
+// SchedulerSkipRecord 认领后跳过分发的任务数（reason ∈ payload/deliver/not_accepted/
+// deadletter/deadletter_error）。
+func (m *Metrics) SchedulerSkipRecord(ctx context.Context, reason string, n int64) {
+	if m == nil || m.SchedulerSkips == nil || n <= 0 {
+		return
+	}
+	m.SchedulerSkips.Add(ctx, n, metric.WithAttributes(attribute.String("reason", reason)))
 }
 
 // WALBacklogRecord WAL 未确认条数/字节数。

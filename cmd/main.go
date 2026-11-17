@@ -7,7 +7,9 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -18,7 +20,24 @@ import (
 	"github.com/improvtrace/stateflux/pkg/buildinfo"
 )
 
+// setupLogging 统一装配进程级 slog 默认 logger（stderr、带级别；级别经
+// STATEFLUX_LOG_LEVEL 覆盖：debug/info/warn/error，默认 info）。内部包统一以
+// slog 记录运行期事件（选举门控、R1 重置、死信、订阅失败等），输出可按级别过滤采集。
+func setupLogging() {
+	level := slog.LevelInfo
+	switch strings.ToLower(os.Getenv("STATEFLUX_LOG_LEVEL")) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn", "warning":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
+}
+
 func main() {
+	setupLogging()
 	root := &cobra.Command{
 		Use:     "stateflux",
 		Short:   "Distributed task framework node: task ledger, dispatch, execution and coherence sync",

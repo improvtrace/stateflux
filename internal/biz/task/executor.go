@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 
 	taskv1 "github.com/improvtrace/stateflux/api/stateflux/task/v1"
 	"github.com/improvtrace/stateflux/internal/obs"
@@ -45,8 +46,12 @@ func (s *ExecutorServer) Execute(ctx context.Context, req *taskv1.ExecuteRequest
 	}
 	ev := s.runtime.Execute(ctx, req.GetTask())
 	// 同步路径的结果也走同一个归集入口（§5.5）：RPC 返回与异步发布不分成两套机制。
+	// 归集失败必须可见——RPC 仍返回执行结果，但终态落库失败只能靠 R1 重派收敛。
 	if s.results != nil {
-		_ = s.results.Consume(ctx, ev)
+		if cerr := s.results.Consume(ctx, ev); cerr != nil {
+			slog.Warn("executor: sync result collection failed (result kept in WAL for replay)",
+				"task_id", ev.GetTaskId(), "attempt", ev.GetAttempt(), "error", cerr)
+		}
 	}
 	return &taskv1.ExecuteResponse{Result: ev}, nil
 }
@@ -95,8 +100,7 @@ func (s *ExecutorServer) Collect(ctx context.Context, req *taskv1.CollectRequest
 		}
 		resp.Accepted++
 	}
-	if s.metrics != nil {
-		s.metrics.CollectorResultRecord(ctx, "succeeded", int64(resp.Accepted))
-	}
+	// 结果指标由 Collector.Consume 内部按真实 outcome 记录（含 stale/dead 分布），
+	// 此处不再重复计数。
 	return resp, nil
 }

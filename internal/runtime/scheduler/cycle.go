@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"time"
 
 	taskv1 "github.com/improvtrace/stateflux/api/stateflux/task/v1"
@@ -106,14 +107,21 @@ func (c *LedgerCycle) RunOnce(ctx context.Context) (CycleResult, error) {
 		}
 		// R3：超过最大认领次数直接写死信，不再分发（§6.2）。
 		if p.Attempt > int64(p.MaxAttempts) {
-			if _, derr := c.ledger.DeadLetter(ctx, p.TaskID); derr == nil && c.metrics != nil {
-				c.metrics.ResetCount(ctx, "dead_letter", 1)
+			if _, derr := c.ledger.DeadLetter(ctx, p.TaskID); derr != nil {
+				slog.Error("scheduler: dead-letter write failed", "task_id", p.TaskID, "error", derr)
+				c.metrics.SchedulerSkipRecord(ctx, "deadletter_error", 1)
+			} else {
+				slog.Warn("scheduler: task dead-lettered (attempts exhausted)", "task_id", p.TaskID, "attempts", p.Attempt)
+				c.metrics.SchedulerSkipRecord(ctx, "deadletter", 1)
 			}
 			res.Skipped++
 			continue
 		}
 		msg, merr := c.message(ctx, p)
 		if merr != nil {
+			slog.Warn("scheduler: build task message failed, task left in processing for R1",
+				"task_id", p.TaskID, "error", merr)
+			c.metrics.SchedulerSkipRecord(ctx, "payload", 1)
 			res.Skipped++
 			continue
 		}
@@ -125,7 +133,17 @@ func (c *LedgerCycle) RunOnce(ctx context.Context) (CycleResult, error) {
 			Semantics:     semantics,
 			CorrelationID: p.ClaimedNode,
 		})
-		if derr != nil || out == nil || !out.Accepted {
+		if derr != nil {
+			slog.Warn("scheduler: deliver failed, task left in processing for R1",
+				"task_id", p.TaskID, "queue", p.Channel, "error", derr)
+			c.metrics.SchedulerSkipRecord(ctx, "deliver", 1)
+			res.Skipped++
+			continue
+		}
+		if out == nil || !out.Accepted {
+			slog.Warn("scheduler: deliver not accepted, task left in processing for R1",
+				"task_id", p.TaskID, "queue", p.Channel)
+			c.metrics.SchedulerSkipRecord(ctx, "not_accepted", 1)
 			res.Skipped++
 			continue
 		}

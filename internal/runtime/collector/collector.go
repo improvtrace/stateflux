@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"time"
 
 	taskv1 "github.com/improvtrace/stateflux/api/stateflux/task/v1"
@@ -89,8 +90,13 @@ func (c *Collector) Consume(ctx context.Context, ev *taskv1.ResultEvent) error {
 func (c *Collector) retry(ctx context.Context, ev *taskv1.ResultEvent) (bool, error) {
 	p, err := c.ledger.GetProcessing(ctx, ev.GetTaskId())
 	if err != nil {
-		// 在途行不存在（可能已被 R1 重置或重复归集）：交由 Complete 走 stale 路径。
-		return false, nil
+		if errors.Is(err, repository.ErrNotFound) {
+			// 在途行不存在（可能已被 R1 重置或重复归集）：交由 Complete 走 stale 路径。
+			return false, nil
+		}
+		// PG 瞬时故障不能当作「行不存在」：走 Complete 会绕过重试/死信判定。
+		// 上抛让调用方 NACK/保留 WAL，由重放路径重试。
+		return false, err
 	}
 	if p.Attempt != ev.GetAttempt() {
 		// 陈旧结果：attempt fence 拒绝，无副作用（§6.2）。
@@ -100,6 +106,8 @@ func (c *Collector) retry(ctx context.Context, ev *taskv1.ResultEvent) (bool, er
 		if _, derr := c.ledger.DeadLetter(ctx, ev.GetTaskId()); derr != nil {
 			return true, derr
 		}
+		slog.Warn("collector: task dead-lettered (retry budget exhausted)",
+			"task_id", ev.GetTaskId(), "attempt", ev.GetAttempt(), "last_error", ev.GetError())
 		c.record(ctx, schema.OutcomeDead, true)
 		return true, nil
 	}

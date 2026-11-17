@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -235,8 +236,6 @@ type Runtime struct {
 	ClaimBatch int `mapstructure:"claim_batch"`
 	// TickInterval 调度 tick（§10 默认 100ms）。
 	TickInterval time.Duration `mapstructure:"tick_interval"`
-	// PromoteInterval 晋升 tick（§10 默认 200ms）。
-	PromoteInterval time.Duration `mapstructure:"promote_interval"`
 	// ReconcileInterval R1 扫描间隔。
 	ReconcileInterval time.Duration `mapstructure:"reconcile_interval"`
 	// DispatchGrace 通道无结果前不重试的最小窗口（§10 默认 90s）。
@@ -330,7 +329,6 @@ func Default() Config {
 			EnableReconcile:   true,
 			ClaimBatch:        500,
 			TickInterval:      100 * time.Millisecond,
-			PromoteInterval:   200 * time.Millisecond,
 			ReconcileInterval: 10 * time.Second,
 			DispatchGrace:     90 * time.Second,
 			WorkerQueues:      []string{"default"},
@@ -423,7 +421,94 @@ func FromViper(v *viper.Viper) (Config, error) {
 	if err := dec.Decode(v.AllSettings()); err != nil {
 		return Default(), fmt.Errorf("config: decode: %w", err)
 	}
+	if err := cfg.Validate(); err != nil {
+		return Default(), fmt.Errorf("config: invalid: %w", err)
+	}
 	return cfg, nil
+}
+
+// Validate 校验配置取值域与必填项：所有子命令（serve/cluster/migrate/info）经 FromViper
+// 装配时统一执行，让错误配置在启动即失败，而不是运行期以 panic 或误导性报错暴露
+// （如 factory_interval <1s 触发窗口除零、redis.addrs 为空到 data 层才报错）。
+func (c Config) Validate() error {
+	var errs []string
+	add := func(format string, args ...any) { errs = append(errs, fmt.Sprintf(format, args...)) }
+
+	if c.PG.DSN == "" {
+		add("pg.dsn 必须非空")
+	}
+	if c.PG.SearchPath == "" {
+		add("pg.search_path 必须非空")
+	}
+	if len(c.Redis.Addrs) == 0 {
+		add("redis.addrs 必须非空（逗号分隔地址列表）")
+	}
+	if c.Cluster.DSN == "" {
+		add("cluster.dsn 必须非空")
+	}
+	if c.Server.GRPCAddr == "" || c.Server.HTTPAddr == "" {
+		add("server.grpc_addr 与 server.http_addr 必须非空")
+	}
+	if c.Server.ShutdownTimeout <= 0 {
+		add("server.shutdown_timeout 必须为正")
+	}
+
+	switch c.Dispatch.DefaultSemantics {
+	case task.AtLeastOnce, task.AtMostOnce, task.ExactlyOnce:
+	default:
+		add("dispatch.default_semantics 必须是 at_least_once/at_most_once/exactly_once，当前 %q", c.Dispatch.DefaultSemantics)
+	}
+	switch c.Dispatch.DefaultDelivery {
+	case task.DeliveryRedisQueue, task.DeliverySyncRPC:
+	default:
+		add("dispatch.default_delivery 必须是 redis_queue/sync_rpc，当前 %q", c.Dispatch.DefaultDelivery)
+	}
+	if c.Dispatch.MaxHops <= 0 {
+		add("dispatch.max_hops 必须为正")
+	}
+	if c.Dispatch.Timeout <= 0 {
+		add("dispatch.timeout 必须为正")
+	}
+	if c.Dispatch.DedupeWindow <= 0 {
+		add("dispatch.dedupe_window 必须为正")
+	}
+	if c.Dispatch.ResultChannel == "" {
+		add("dispatch.result_channel 必须非空")
+	}
+
+	if c.Runtime.TickInterval <= 0 {
+		add("runtime.tick_interval 必须为正")
+	}
+	if c.Runtime.ReconcileInterval <= 0 {
+		add("runtime.reconcile_interval 必须为正")
+	}
+	if c.Runtime.DispatchGrace <= 0 {
+		add("runtime.dispatch_grace 必须为正")
+	}
+	if c.Runtime.ClaimBatch <= 0 {
+		add("runtime.claim_batch 必须为正")
+	}
+	if c.Runtime.FactoryInterval < 0 {
+		add("runtime.factory_interval 不得为负（0 表示不注册工厂）")
+	}
+	for _, t := range c.Runtime.SchedulerTriggers {
+		switch t {
+		case "tick", "notify", "coherence", "manual":
+		default:
+			add("runtime.scheduler_triggers 含未知触发器 %q（可用 tick/notify/coherence/manual）", t)
+		}
+	}
+	if c.Coherence.SyncInterval <= 0 {
+		add("coherence.sync_interval 必须为正")
+	}
+	if c.Coherence.RevisionTTL <= 0 {
+		add("coherence.revision_ttl 必须为正")
+	}
+
+	if len(errs) == 0 {
+		return nil
+	}
+	return errors.New(strings.Join(errs, "; "))
 }
 
 // FromEnv 在 Default 之上应用环境变量覆盖（STATEFLUX_ 前缀）；

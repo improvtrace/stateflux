@@ -118,8 +118,8 @@ func TestConsumeRejectsStaleAttempt(t *testing.T) {
 }
 
 func TestConsumeMissingProcessingFallsBackToComplete(t *testing.T) {
-	// 在途行已被 R1 重置：GetProcessing 失败，交由 Complete 走 stale 路径裁决。
-	ledger := &fakeLedger{getErr: errors.New("not found")}
+	// 在途行已被 R1 重置：GetProcessing 返回 ErrNotFound，交由 Complete 走 stale 路径裁决。
+	ledger := &fakeLedger{getErr: repository.ErrNotFound}
 	c := newCollector(ledger)
 
 	if err := c.Consume(context.Background(), &taskv1.ResultEvent{
@@ -129,6 +129,23 @@ func TestConsumeMissingProcessingFallsBackToComplete(t *testing.T) {
 	}
 	if len(ledger.completed) != 1 {
 		t.Fatal("missing processing row must defer to Complete")
+	}
+}
+
+// PG 瞬时故障（非 ErrNotFound）不得当作「行不存在」走 Complete——那会绕过
+// 重试/死信判定；必须上抛，由调用方 NACK/保留 WAL 重放。
+func TestConsumeGetProcessingErrorPropagates(t *testing.T) {
+	ledger := &fakeLedger{getErr: errors.New("connection refused")}
+	c := newCollector(ledger)
+
+	err := c.Consume(context.Background(), &taskv1.ResultEvent{
+		TaskId: 1, Attempt: 1, Outcome: taskv1.Outcome_OUTCOME_FAILED,
+	})
+	if err == nil {
+		t.Fatal("GetProcessing transient failure must propagate, got nil")
+	}
+	if len(ledger.completed)+len(ledger.requeued)+len(ledger.deadLettered) != 0 {
+		t.Fatal("transient failure must have no ledger side effects")
 	}
 }
 

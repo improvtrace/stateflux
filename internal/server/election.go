@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -92,12 +93,20 @@ func (g *electionGate) sync(ctx context.Context) {
 	g.mu.Unlock()
 	switch {
 	case want && !running:
-		if err := g.inner.Start(ctx); err == nil {
-			g.mu.Lock()
-			g.running = true
-			g.mu.Unlock()
+		if err := g.inner.Start(ctx); err != nil {
+			// 吞错会让该节点静默空转：显式报错并等下个轮询周期重试。
+			slog.Error("election: control-plane component failed to start (will retry)",
+				"component", g.name, "self", g.self, "error", err)
+			return
 		}
+		g.mu.Lock()
+		g.running = true
+		g.mu.Unlock()
+		slog.Info("election: control-plane component started (this node is scheduler)",
+			"component", g.name, "self", g.self)
 	case !want && running:
+		slog.Info("election: control-plane component stopped (scheduler role moved away)",
+			"component", g.name, "self", g.self)
 		g.stopInner()
 	}
 }
@@ -108,7 +117,10 @@ func (g *electionGate) stopInner() {
 	g.running = false
 	g.mu.Unlock()
 	if running {
-		_ = g.inner.Stop()
+		if err := g.inner.Stop(); err != nil {
+			slog.Warn("election: control-plane component stop returned error",
+				"component", g.name, "error", err)
+		}
 	}
 }
 

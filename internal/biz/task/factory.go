@@ -40,10 +40,12 @@ func (f *HeartbeatFactory) Interval() time.Duration { return f.interval }
 
 // Generate 实现 factory.Factory：本窗口内至多一个心跳任务。
 func (f *HeartbeatFactory) Generate(_ context.Context, now time.Time) ([]domaintask.Task, error) {
-	if f.interval <= 0 {
+	if f.interval <= time.Millisecond {
 		return nil, nil
 	}
-	window := now.Unix() / int64(f.interval.Seconds())
+	// 窗口用毫秒刻度：秒刻度在 interval <1s 时除数为 0（整数除零 panic），
+	// 毫秒刻度对任意 >=1ms 的 interval 都成立。
+	window := now.UnixMilli() / f.interval.Milliseconds()
 	return []domaintask.Task{domaintask.FuncTask{
 		S: domaintask.Spec{
 			Type:           DemoType,

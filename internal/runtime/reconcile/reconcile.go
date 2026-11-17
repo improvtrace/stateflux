@@ -9,6 +9,7 @@ package reconcile
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -159,7 +160,9 @@ func (r *Reconciler) Start(ctx context.Context) error {
 			case <-runCtx.Done():
 				return
 			case <-t.C:
-				_, _ = r.RunOnce(runCtx)
+				if _, err := r.RunOnce(runCtx); err != nil {
+					slog.Error("reconcile: round failed", "error", err)
+				}
 			}
 		}
 	}()
@@ -214,10 +217,14 @@ func (r *Reconciler) RunOnce(ctx context.Context) (int, error) {
 		if r.metrics != nil {
 			r.metrics.ResetCount(ctx, "r1_error", 1)
 		}
+		slog.Error("reconcile: R1 reset scan failed", "error", err)
 		return 0, err
 	}
-	if reset > 0 && r.metrics != nil {
-		r.metrics.ResetCount(ctx, "r1_timeout", int64(reset))
+	if reset > 0 {
+		if r.metrics != nil {
+			r.metrics.ResetCount(ctx, "r1_timeout", int64(reset))
+		}
+		slog.Warn("reconcile: R1 reset stale processing rows for re-dispatch", "count", reset)
 	}
 	r.mu.Lock()
 	r.rounds++
@@ -225,7 +232,11 @@ func (r *Reconciler) RunOnce(ctx context.Context) (int, error) {
 	r.mu.Unlock()
 	if doPurge {
 		// R2：只清理视图，不据此修改 PG（§6.2）。
-		_, _ = r.view.Purge(ctx, r.prefix)
+		if n, perr := r.view.Purge(ctx, r.prefix); perr != nil {
+			slog.Warn("reconcile: R2 view purge failed", "error", perr)
+		} else if n > 0 {
+			slog.Info("reconcile: R2 purged stale view entries", "count", n)
+		}
 	}
 	r.scanOrphans(ctx)
 	return reset, nil

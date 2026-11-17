@@ -24,8 +24,9 @@ import (
 	"time"
 
 	// pq 驱动：注册 database/sql 的 "postgres"（与 internal/domain/data 同一驱动；
-	// 无参数的 Exec 走简单协议，单次可执行整个多语句 SQL 文件）。
-	_ "github.com/lib/pq"
+	// 无参数的 Exec 走简单协议，单次可执行整个多语句 SQL 文件）；pq.Array 用于
+	// 版本账本接管判据的 ANY($1) 数组绑定。
+	pq "github.com/lib/pq"
 
 	"github.com/improvtrace/stateflux/internal/domain/data"
 	"github.com/improvtrace/stateflux/pkg/buildinfo"
@@ -36,13 +37,26 @@ import (
 //go:embed *.sql
 var sqlFS embed.FS
 
+// versionTableName 是版本账本表名。带 stateflux_ 前缀：裸名 version 在共用库中
+// 极易与其他应用的版本表撞名（CREATE TABLE IF NOT EXISTS 会静默跳过并把别人的
+// 版本串当迁移历史）。旧部署的裸名 version 表由 ensureVersionTable 探测并接管。
+const versionTableName = "stateflux_version"
+
 // versionTableDDL 是版本账本的建表语句（migrate 引导创建，先于任何版本应用）：
 // 每应用一个版本（含首次安装）插入一行，date 为应用时间。
-const versionTableDDL = `CREATE TABLE IF NOT EXISTS version (
+const versionTableDDL = `CREATE TABLE IF NOT EXISTS ` + versionTableName + ` (
   id      BIGSERIAL PRIMARY KEY,
   version TEXT NOT NULL UNIQUE,
   date    TIMESTAMPTZ NOT NULL DEFAULT now()
 )`
+
+// ownedTables 是本产品建在 search_path schema 下的全部表（rebuild 重建模式逐一
+// DROP 的清单；version 账本表包含在内，裸名 legacy version 见 ownsLegacyVersionTable）。
+var ownedTables = []string{
+	"task_pendings", "task_schedulables", "task_processings", "task_completeds",
+	"task_identities", "task_payloads", "task_results",
+	versionTableName,
+}
 
 // GoMigration 是一个 Go 实现的迁移：Name 与同名 SQL 文件的基名一致
 // （${version}_${date}）；Up 在该版本的事务内、同名 SQL 之后执行。
@@ -203,20 +217,19 @@ func Run(ctx context.Context, dsn, searchPath string, opts Options) ([]string, e
 	}
 
 	if opts.Rebuild {
-		if _, err := db.ExecContext(ctx,
-			fmt.Sprintf(`DROP SCHEMA %s CASCADE; CREATE SCHEMA %s;`, searchPath, searchPath)); err != nil {
-			return nil, fmt.Errorf("migration: rebuild schema %s: %w", searchPath, err)
+		if err := dropOwnedObjects(ctx, db, searchPath); err != nil {
+			return nil, fmt.Errorf("migration: rebuild: %w", err)
 		}
 	}
 
 	// 版本账本引导（两种模式都需要：重建模式的记录由随后的数据恢复回填）。
-	if _, err := db.ExecContext(ctx, versionTableDDL); err != nil {
+	if err := ensureVersionTable(ctx, db, searchPath); err != nil {
 		return nil, fmt.Errorf("migration: ensure version table: %w", err)
 	}
 
 	applied := map[string]bool{}
 	if !opts.Rebuild {
-		rows, err := db.QueryContext(ctx, "SELECT version FROM version")
+		rows, err := db.QueryContext(ctx, "SELECT version FROM "+versionTableName)
 		if err != nil {
 			return nil, fmt.Errorf("migration: read version table: %w", err)
 		}
@@ -281,12 +294,101 @@ func applyOne(ctx context.Context, db *sql.DB, m Migration, rebuild bool) error 
 		}
 	}
 	if !rebuild {
-		if _, err := tx.ExecContext(ctx, "INSERT INTO version (version) VALUES ($1)", m.Version); err != nil {
+		if _, err := tx.ExecContext(ctx, "INSERT INTO "+versionTableName+" (version) VALUES ($1)", m.Version); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("record version: %w", err)
 		}
 	}
 	return tx.Commit()
+}
+
+// dropOwnedObjects 是重建模式的清理步骤：只删除本产品自有的对象（ownedTables 全部表
+// + 专用 stateflux schema），**不再 DROP SCHEMA <search_path> CASCADE**——后者会把
+// 共用库中其他应用的全部对象连带清空。search_path schema 本身不动（自定义 schema
+// 缺失时补建）。legacy 裸名 version 表仅在确认属于本产品时才纳入（见
+// ownsLegacyVersionTable）。
+func dropOwnedObjects(ctx context.Context, db *sql.DB, searchPath string) error {
+	tables := ownedTables
+	if owns, err := ownsLegacyVersionTable(ctx, db, searchPath); err != nil {
+		return err
+	} else if owns {
+		tables = append(append([]string(nil), tables...), "version")
+	}
+	if _, err := db.ExecContext(ctx, ownedDropSQL(searchPath, tables)); err != nil {
+		return fmt.Errorf("drop owned tables: %w", err)
+	}
+	// 专用 schema（函数/序列）整体回收；role stateflux_biz 保留（DROP ROLE 影响面大，
+	// 由运维显式处理）。
+	if _, err := db.ExecContext(ctx, `DROP SCHEMA IF EXISTS stateflux CASCADE`); err != nil {
+		return fmt.Errorf("drop stateflux schema: %w", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS %s`, searchPath)); err != nil {
+		return fmt.Errorf("ensure schema %s: %w", searchPath, err)
+	}
+	return nil
+}
+
+// ownedDropSQL 拼接 owned 表的 DROP 语句（全部 IF EXISTS + CASCADE 清理触发器等
+// 依赖对象）。searchPath 已由 identifierRe 校验，可安全内插。
+func ownedDropSQL(searchPath string, tables []string) string {
+	quoted := make([]string, 0, len(tables))
+	for _, t := range tables {
+		quoted = append(quoted, searchPath+"."+t)
+	}
+	return "DROP TABLE IF EXISTS " + strings.Join(quoted, ", ") + " CASCADE"
+}
+
+// ownsLegacyVersionTable 判断 search_path 下的裸名 version 表是否为本产品的旧版本
+// 账本（含 stateflux 已知版本记录）。判据是内容而非存在性：共用库中别人的 version
+// 表恰好同名的概率不低，但装有 chronos.* 版本串的只可能是本产品。读取失败视为
+// 非本产品（不纳入 DROP，宁可漏删不可误删）。
+func ownsLegacyVersionTable(ctx context.Context, db *sql.DB, searchPath string) (bool, error) {
+	var exists bool
+	if err := db.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM information_schema.tables
+		  WHERE table_schema = $1 AND table_name = 'version')`, searchPath).Scan(&exists); err != nil {
+		return false, fmt.Errorf("probe legacy version table: %w", err)
+	}
+	if !exists {
+		return false, nil
+	}
+	known := buildinfo.Versions()
+	var hits int
+	if err := db.QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT count(*) FROM %s.version WHERE version = ANY($1)`, searchPath),
+		pq.Array(known)).Scan(&hits); err != nil {
+		return false, nil // 无法读取（权限/结构不符）：当作非本产品，不纳入清理
+	}
+	return hits > 0, nil
+}
+
+// ensureVersionTable 引导版本账本：新表已存在直接返回；旧部署的裸名 version 表
+// （内容确属本产品）改名接管，保留已应用版本历史；其余情况新建空表。
+func ensureVersionTable(ctx context.Context, db *sql.DB, searchPath string) error {
+	var reg *string
+	if err := db.QueryRowContext(ctx,
+		`SELECT to_regclass($1)`, searchPath+"."+versionTableName).Scan(&reg); err != nil {
+		return fmt.Errorf("probe %s: %w", versionTableName, err)
+	}
+	if reg != nil {
+		return nil
+	}
+	owns, err := ownsLegacyVersionTable(ctx, db, searchPath)
+	if err != nil {
+		return err
+	}
+	if owns {
+		if _, err := db.ExecContext(ctx,
+			fmt.Sprintf(`ALTER TABLE %s.version RENAME TO %s`, searchPath, versionTableName)); err != nil {
+			return fmt.Errorf("adopt legacy version table: %w", err)
+		}
+		return nil
+	}
+	if _, err := db.ExecContext(ctx, versionTableDDL); err != nil {
+		return err
+	}
+	return nil
 }
 
 func indexOf(vs []string, v string) int {

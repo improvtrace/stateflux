@@ -56,6 +56,22 @@ if [ -f "$PREFIX/stateflux" ]; then
 	log "旧布局迁移: 移除平铺二进制 $PREFIX/stateflux（新版位于 bin/）"
 fi
 
+# 重复执行视为升级：替换二进制前优雅停止运行中的 serve/cluster（运行中 ELF 的
+# install 会以 Text file busy 失败，留下半换状态）；完成后提示人工重启。
+if pgrep -f 'stateflux (serve|cluster)' >/dev/null 2>&1; then
+	STOPPED_PIDS="$(pgrep -f 'stateflux (serve|cluster)')"
+	log "检测到运行中的 stateflux 进程: $STOPPED_PIDS（安装期间先优雅停止）"
+	kill $STOPPED_PIDS 2>/dev/null || true
+	waited=0
+	while [ "$waited" -lt 15 ] && pgrep -f 'stateflux (serve|cluster)' >/dev/null 2>&1; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if pgrep -f 'stateflux (serve|cluster)' >/dev/null 2>&1; then
+		kill -9 $(pgrep -f 'stateflux (serve|cluster)') 2>/dev/null || true
+	fi
+fi
+
 install -m 0755 "$SCRIPT_DIR/bin/stateflux" "$PREFIX/bin/stateflux"
 
 if [ -f "$PREFIX/conf/config.yaml" ]; then
@@ -74,6 +90,9 @@ fi
 ln -sfn "$PREFIX/bin/stateflux" "$BIN_LINK_DIR/stateflux"
 
 log "安装完成: $PREFIX（命令: $BIN_LINK_DIR/stateflux）"
+if [ -n "${STOPPED_PIDS:-}" ]; then
+	log "注意：安装前已停止运行中的 stateflux 进程，请按原部署方式重启"
+fi
 log "每个节点使用同一份配置，按以下顺序初始化与启动："
 log "  0) 初始化 PG（建表 + version 表版本记录，幂等）: stateflux migrate --config $PREFIX/conf/config.yaml"
 log "  1) 本机外置集群服务: stateflux cluster --config $PREFIX/conf/config.yaml"

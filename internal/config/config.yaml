@@ -69,7 +69,6 @@ runtime:
   enable_reconcile: true
   claim_batch: 500
   tick_interval: 100ms
-  promote_interval: 200ms
   reconcile_interval: 10s
   # processing 超过该时长视为失联（R1 重派），同时作为执行超时。
   dispatch_grace: 90s

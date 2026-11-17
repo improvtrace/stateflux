@@ -3,10 +3,16 @@ package repository
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/improvtrace/stateflux/internal/domain/schema"
 )
+
+// ErrNotFound 表示查询目标行不存在。由 data 层把 ent 的 NotFoundError 翻译而来：
+// 接口不泄漏 ORM 错误类型，调用方用 errors.Is 区分「不存在」与真实故障——两者
+// 的处理路径不同（不存在走幂等/stale 路径，故障必须上抛重试）。
+var ErrNotFound = errors.New("repository: not found")
 
 // Store 是任务账本的组合根（§3.1/§5.2/§5.5）：聚合七张表的单表仓储（见下方访问器），并以本
 // 文件的跨表方法承担唯一写面。晋升、认领、终态与 R1 重置都是「读源表 → 写目标表 → 删源表」的
@@ -57,9 +63,9 @@ type Store interface {
 	GetPayload(ctx context.Context, taskID int64) ([]byte, error)
 	// Requeue 可重试失败：processing → schedulable，不修改 attempts（下次 claim 才 +1，§5.5）。
 	Requeue(ctx context.Context, taskID int64) (bool, error)
-	// GetProcessing 按 task_id 读取在途行（不存在返回 ent.NotFoundError）。
+	// GetProcessing 按 task_id 读取在途行（不存在返回 ErrNotFound）。
 	GetProcessing(ctx context.Context, taskID int64) (*Processing, error)
-	// GetResult 按 task_id 读取终态结果（不存在返回 ent.NotFoundError）。
+	// GetResult 按 task_id 读取终态结果（不存在返回 ErrNotFound）。
 	GetResult(ctx context.Context, taskID int64) (*Result, error)
 	// CountPending 返回 pending 待晋升行数。
 	CountPending(ctx context.Context) (int, error)

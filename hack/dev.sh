@@ -30,7 +30,7 @@ case "${1:-}" in
     export STATEFLUX_COHERENCE_SYNC_INTERVAL="${STATEFLUX_COHERENCE_SYNC_INTERVAL:-2s}"
     export STATEFLUX_RUNTIME_SCHEDULER_TRIGGERS="${STATEFLUX_RUNTIME_SCHEDULER_TRIGGERS:-tick,coherence}"
     export STATEFLUX_RUNTIME_FACTORY_INTERVAL="${STATEFLUX_RUNTIME_FACTORY_INTERVAL:-5s}"
-    exec dist/bin/stateflux
+    exec dist/bin/stateflux serve
     ;;
   *)
     echo "usage: $0 up|down|migrate|run" >&2

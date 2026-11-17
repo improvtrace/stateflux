@@ -554,16 +554,22 @@ func (s *store) ResetExpired(ctx context.Context, deadline time.Time, limit int)
 func (s *store) GetProcessing(ctx context.Context, taskID int64) (*repository.Processing, error) {
 	p, err := s.data.db.TaskProcessing.Query().Where(taskprocessing.ID(taskID)).Only(ctx)
 	if err != nil {
+		if ent.IsNotFound(err) {
+			return nil, repository.ErrNotFound
+		}
 		return nil, err
 	}
 	row := processingFromEnt(p)
 	return &row, nil
 }
 
-// GetResult 按 task_id 读取终态结果（不存在返回 Not Found 错误）。
+// GetResult 按 task_id 读取终态结果（不存在返回 repository.ErrNotFound）。
 func (s *store) GetResult(ctx context.Context, taskID int64) (*repository.Result, error) {
 	r, err := s.data.db.TaskResult.Query().Where(taskresult.ID(taskID)).Only(ctx)
 	if err != nil {
+		if ent.IsNotFound(err) {
+			return nil, repository.ErrNotFound
+		}
 		return nil, err
 	}
 	res := resultFromEnt(r)

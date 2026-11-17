@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sync"
 
 	"github.com/improvtrace/stateflux/internal/obs"
@@ -77,15 +78,19 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	return s.trigger.Run(ctx, s.tick)
 }
 
-// tick 是 Trigger 驱动的单轮：执行 Cycle 并把错误交给指标，不向触发器返回致命错误
+// tick 是 Trigger 驱动的单轮：执行 Cycle 并记录吞吐/跳过指标，不向触发器返回致命错误
 // （单轮失败不应终止整个调度实例）。
 func (s *Scheduler) tick(ctx context.Context) error {
 	res, err := s.cycle.RunOnce(ctx)
-	if err != nil && s.metrics != nil {
-		s.metrics.ResetCount(ctx, "cycle_error", 1)
+	if err != nil {
+		slog.Error("scheduler: cycle failed", "error", err)
+		s.metrics.SchedulerCycleRecord(ctx, "error", 1)
+		return err
 	}
-	_ = res
-	return err
+	s.metrics.SchedulerCycleRecord(ctx, "promoted", int64(res.Promoted))
+	s.metrics.SchedulerCycleRecord(ctx, "claimed", int64(res.Claimed))
+	s.metrics.SchedulerCycleRecord(ctx, "dispatched", int64(res.Dispatched))
+	return nil
 }
 
 // Group 托管一组调度实例并统一启停。

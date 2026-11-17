@@ -266,8 +266,11 @@ SQL 为主（整文件单事务执行，支持 `$$` 函数体），Go 迁移用�
 当前 `chronos.0.1` 的初始化迁移由原 000001~000003 三个文件**合并为单个**
 `chronos.0.1_20260929.sql`（七表账本 + 挪行函数/索引 + 唤醒触发器）。
 
-PG 中维护 `version` 表：**每次升级（含首次安装）应用一个版本即插入一条
-`{id, version, date}`**，已记录的版本跳过，重复执行幂等。
+PG 中维护 `stateflux_version` 表（带前缀防共用库撞名；旧部署的裸名 `version` 表由
+migrate 自动探测改名接管）：**每次升级（含首次安装）应用一个版本即插入一条
+`{id, version, date}`**，已记录的版本跳过，重复执行幂等。`--rebuild` 只清理本产品
+自有对象（七表账本 + `stateflux_version` + `stateflux` schema），**不会** DROP 整个
+search_path schema。
 
 ```bash
 stateflux migrate                                # 初始化 / 升级到嵌入历史的最新版本
@@ -280,18 +283,24 @@ stateflux migrate --generate chronos.0.2         # 开发期：同时生成该�
 （用包内文件完整回退；两者都需 `pg_dump` / `pg_restore`）：
 
 ```bash
-sudo ./upgrade.sh       # 升级（新包内）：dump 当前库 → 替换 bin/conf → stateflux migrate
-sudo ./downgrade.sh     # 降级（旧包内）：dump 当前库 → 替换回包内 bin/conf → rebuild → 回载该版本 dump
+sudo ./upgrade.sh       # 升级（新包内）：停服务 → dump 当前库 → 替换 bin → stateflux migrate
+sudo ./downgrade.sh     # 降级（旧包内）：停服务 → dump 当前库 → 替换回包内 bin → rebuild → 回载该版本 dump
 ```
 
-- 升级前自动 `pg_dump` 当前库到 `/usr/local/stateflux/dumps/${timestamp}_${version}.dump`，
-  再替换二进制与配置（旧配置带时间戳备份为 `conf/config.yaml.bak-<ts>`），最后执行
-  `stateflux migrate`（version 表记录新版本）；迁移失败时提示用该 dump 恢复。
-- 降级同样先 dump 当前库，然后用**旧版本包内**的 `bin/stateflux`、`conf/config.yaml`、
-  `VERSION` 替换已装文件（旧配置同样时间戳备份），`stateflux migrate --target <包版本>
-  --rebuild` 重建该版本 schema（不写 version 记录），最后以 `pg_restore --data-only`
-  加载该版本最近一份 dump（业务数据与 version 记录一并回填）——二进制、配置、数据库
-  全部回退。前提是 dumps/ 下留存过该版本的备份（每次升级 / 降级都会自动留）。
+- 升级/降级前若检测到运行中的 serve/cluster 进程，先 SIGTERM 优雅停止（预算 15s，
+  超时 SIGKILL）；完成后**不自动重启**，按原部署方式人工拉起。
+- 升级前自动 `pg_dump` 当前库到 `/usr/local/stateflux/dumps/${timestamp}_${version}.dump`
+  （临时文件 + 原子改名，失败不残留），并用一次 schema-only 探针 dump 校验 PG 连通性与
+  pg_dump 客户端/服务端版本兼容（不匹配可经 `PG_DUMP=/path/to/pg_dump` 覆盖）。
+- `conf/config.yaml` 遵循 install.sh 契约**不覆盖**（节点本地状态）：包内新版差异旁路
+  保存为 `conf/config.yaml.new`，人工确认合并；随后执行 `stateflux migrate`
+  （`stateflux_version` 表记录新版本），迁移失败时提示用 dump 恢复。
+- 降级同样先 dump 当前库（**警告**：该版本历史 dump 之后产生的增量数据不保留，仅存于
+  降级前的当前版本 dump），然后用**旧版本包内**的 `bin/stateflux`、`VERSION` 替换已装
+  文件，`stateflux migrate --target <包版本> --rebuild` 重建该版本 schema（只清理本产品
+  自有对象，不写版本记录），最后以 `pg_restore --data-only` 加载该版本最近一份 dump
+  （业务数据与版本记录一并回填）——二进制、配置、数据库全部回退。前提是 dumps/ 下
+  留存过该版本的备份（每次升级 / 降级都会自动留）。
 
 | 环境变量 | 默认 | 说明 |
 | --- | --- | --- |
@@ -305,9 +314,9 @@ sudo ./downgrade.sh     # 降级（旧包内）：dump 当前库 → 替换回�
 | `STATEFLUX_CLUSTER_MOCK_SERVER_NODES` | 空（主机派生 ID 的默认单节点） | `cluster` 子命令节点规格串，逗号分隔（规格内用分号分隔列表） |
 | `STATEFLUX_SERVER_GRPC_ADDR` / `_HTTP_ADDR` | `127.0.0.1:9090` / `127.0.0.1:9091` | 监听地址 |
 | `STATEFLUX_SERVER_SHUTDOWN_TIMEOUT` | `10s` | 优雅退出总预算 |
+| `STATEFLUX_LOG_LEVEL` | `info` | 进程日志级别：`debug`/`info`/`warn`/`error`（stderr，结构化 slog） |
 | `STATEFLUX_RUNTIME_SCHEDULER_TRIGGERS` | `tick` | 逗号分隔：`tick,notify,coherence,manual`，多个值 = 多个 Scheduler 实例 |
 | `STATEFLUX_RUNTIME_TICK_INTERVAL` | `100ms` | tick 触发周期 |
-| `STATEFLUX_RUNTIME_PROMOTE_INTERVAL` | `200ms` | pending→schedulable 挪行周期 |
 | `STATEFLUX_RUNTIME_CLAIM_BATCH` | `500` | 单轮认领批量 |
 | `STATEFLUX_RUNTIME_RECONCILE_INTERVAL` | `10s` | 对账（R1 等）周期 |
 | `STATEFLUX_RUNTIME_DISPATCH_GRACE` | `90s` | processing 超过此时长视为失联（R1 重派）；同时作为执行超时 |

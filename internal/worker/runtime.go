@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -159,6 +160,10 @@ func (r *Runtime) subscribeDesired(ctx context.Context) {
 	if r.queueSource != nil {
 		if queues, err := r.queueSource.AssignedQueues(ctx, r.nodeID); err == nil {
 			desired = queues
+		} else {
+			// 拉取失败回落静态配置集：视图来源持续故障时必须可见（队列映射停更）。
+			slog.Warn("worker: fetch assigned queues failed, falling back to static set",
+				"node", r.nodeID, "error", err)
 		}
 	}
 	r.reconcileSubscriptions(ctx, desired)
@@ -188,10 +193,14 @@ func (r *Runtime) reconcileSubscriptions(ctx context.Context, want []string) {
 		}
 		if paused {
 			// 高水位：暂停新订阅、继续结果发送（§10、§14.7）。
+			slog.Warn("worker: subscription paused by WAL high-water", "queue", q,
+				"backlog", r.wal.Len())
 			continue
 		}
 		sub, err := r.bus.SubscribeTopic(ctx, channel.Topic(q), r.onEnvelope, eventbus.WithChannel(q))
 		if err != nil {
+			// 订阅失败静默会让 worker 实际不消费任何队列：下轮重算重试，但必须可见。
+			slog.Warn("worker: subscribe queue failed (will retry next refresh)", "queue", q, "error", err)
 			continue
 		}
 		r.subs[q] = sub
@@ -344,6 +353,10 @@ func (r *Runtime) recordAndPublish(ctx context.Context, ev *taskv1.ResultEvent) 
 	}
 	if err := r.sink(ctx, ev); err == nil {
 		r.wal.Ack(ev.GetTaskId(), ev.GetAttempt())
+	} else {
+		// 结果通道持续断连只有 WAL 积压上涨可推断：失败本身也要可见。
+		slog.Warn("worker: publish result failed, kept in WAL for replay",
+			"task_id", ev.GetTaskId(), "attempt", ev.GetAttempt(), "error", err)
 	}
 	r.recordBacklog(ctx)
 }

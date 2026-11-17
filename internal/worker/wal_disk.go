@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -130,11 +131,15 @@ func (w *DiskWAL) Add(ev *taskv1.ResultEvent) {
 	}
 	body, err := proto.Marshal(ev)
 	if err != nil {
+		slog.Error("wal: marshal result failed, result not journaled", "task_id", ev.GetTaskId(), "error", err)
 		return
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if err := w.appendAdd(body); err != nil {
+		// WAL 写失败意味着进程崩溃即丢该结果（R1 兜底重派）：必须可见。
+		slog.Error("wal: append failed, result at risk until R1 re-dispatch",
+			"task_id", ev.GetTaskId(), "path", w.path, "error", err)
 		return
 	}
 	w.applyAdd(ev)
@@ -148,12 +153,16 @@ func (w *DiskWAL) Ack(taskID, attempt int64) {
 		return
 	}
 	if err := w.appendAck(taskID, attempt); err != nil {
+		slog.Warn("wal: ack journal failed, entry will replay after restart",
+			"task_id", taskID, "attempt", attempt, "error", err)
 		return
 	}
 	w.applyAck(taskID, attempt)
 	w.acksSinceCompact++
 	if w.acksSinceCompact >= compactAckThreshold {
-		_ = w.compactLocked()
+		if err := w.compactLocked(); err != nil {
+			slog.Warn("wal: compact failed (retry on next ack)", "path", w.path, "error", err)
+		}
 	}
 }
 

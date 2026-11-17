@@ -3,6 +3,7 @@ package rpc
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strconv"
 	"sync"
 	"time"
@@ -101,11 +102,15 @@ func (s *Stream) conn(address string) (*streamConn, error) {
 	if err != nil {
 		return nil, err
 	}
-	stream, err := taskv1.NewExecutorServiceClient(conn).ResultStream(context.Background())
+	// 流绑定独立可取消 ctx：close()/drop 时主动撤销，避免与调用 ctx 脱钩的连接悬住
+	// （recvLoop 退出前 Recv 一直阻塞，只有取消 ctx 才能让 gRPC 立即拆除流）。
+	streamCtx, cancel := context.WithCancel(context.Background())
+	stream, err := taskv1.NewExecutorServiceClient(conn).ResultStream(streamCtx)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
-	sc := newStreamConn(address, stream)
+	sc := newStreamConn(address, stream, cancel)
 	s.streams[address] = sc
 	return sc, nil
 }
@@ -139,6 +144,7 @@ func (s *Stream) Close() error {
 type streamConn struct {
 	address string
 	stream  taskv1.ExecutorService_ResultStreamClient
+	cancel  context.CancelFunc // 撤销流 ctx（与 stream 同生命周期）
 
 	sendMu sync.Mutex // 串行化 Send，保证 gRPC 流的线程安全
 
@@ -148,8 +154,8 @@ type streamConn struct {
 	recvErr error
 }
 
-func newStreamConn(address string, stream taskv1.ExecutorService_ResultStreamClient) *streamConn {
-	sc := &streamConn{address: address, stream: stream, waiters: map[string]chan *taskv1.ResultAck{}}
+func newStreamConn(address string, stream taskv1.ExecutorService_ResultStreamClient, cancel context.CancelFunc) *streamConn {
+	sc := &streamConn{address: address, stream: stream, cancel: cancel, waiters: map[string]chan *taskv1.ResultAck{}}
 	go sc.recvLoop()
 	return sc
 }
@@ -185,11 +191,27 @@ func (sc *streamConn) send(ctx context.Context, ev *taskv1.ResultEvent) (*taskv1
 
 	select {
 	case ack := <-ch:
-		return ack, nil
+		return recvAck(sc, ack)
 	case <-ctx.Done():
 		sc.remove(key)
 		return nil, ctx.Err()
 	}
+}
+
+// recvAck 校验等待到的 ack：waiter channel 被对端关闭（recvLoop 出错或主动 close）
+// 时收到的是零值/nil——必须视为投递失败并透出底层错误，绝不能当作已确认（否则
+// worker 会 Ack WAL，结果静默丢失，只能等 R1 重派）。
+func recvAck(sc *streamConn, ack *taskv1.ResultAck) (*taskv1.ResultAck, error) {
+	if ack != nil {
+		return ack, nil
+	}
+	sc.mu.Lock()
+	err := sc.recvErr
+	sc.mu.Unlock()
+	if err == nil {
+		err = ErrClosedBeforeAck
+	}
+	return nil, err
 }
 
 func (sc *streamConn) remove(key string) {
@@ -205,11 +227,14 @@ func (sc *streamConn) recvLoop() {
 			sc.mu.Lock()
 			sc.closed = true
 			sc.recvErr = err
+			waiters := len(sc.waiters)
 			for key, ch := range sc.waiters {
 				close(ch)
 				delete(sc.waiters, key)
 			}
 			sc.mu.Unlock()
+			slog.Warn("eventbus/channel/rpc: result stream broke, in-flight sends will retry",
+				"address", sc.address, "waiters", waiters, "error", err)
 			return
 		}
 		key := ackKey(ack.GetTaskId(), ack.GetAttempt())
@@ -243,6 +268,9 @@ func (sc *streamConn) close() {
 		delete(sc.waiters, key)
 	}
 	sc.mu.Unlock()
+	if sc.cancel != nil {
+		sc.cancel()
+	}
 	_ = sc.stream.CloseSend()
 }
 
