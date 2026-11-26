@@ -1,0 +1,29 @@
+# stateflux、datamigrate 与 mock-dm 的配置示例。
+#
+# 复制一份并按环境修改，经 --config <路径> 指定。配置只有两个来源：本文件与
+# 命令行参数（显式给出的参数优先于本文件，如 --pg-dsn）；不读取环境变量。
+# datamigrate 只使用 [postgres] 段，mock-dm 只使用 [dm] 段（作为它的监听地址
+# 与服务密钥）。
+
+[postgres]
+# PostgreSQL 数据源名称（URL 形式）。stateflux 与 datamigrate 共用。库名所指的
+# 数据库不存在时，datamigrate 自动创建（账号须有 CREATEDB 权限）。
+dsn = postgres://postgres:postgres@127.0.0.1:5432/stateflux?sslmode=disable
+
+[redis]
+# 节点地址，多个以英文逗号间隔；首个地址可带认证，格式 user:password@host。
+addrs = 127.0.0.1:6379
+# 库号。
+db = 0
+
+[dm]
+# dm 服务的 unix socket 监听地址：dispatch 经它查询集群节点表，stateflux 启动
+# 时也经它获取本节点 ID（ListClusterNodesStatus 响应的 node_id）。本地没有 dm
+# 时，mock-dm --config <本文件> --nodes N 即在这个地址上起桩。
+address = /tmp/pam/dm.sock
+# dm 服务内部接口的服务密钥。
+service_key = change-me
+
+[schedule]
+# 对账间隔。
+reconcile_interval = 30s

@@ -1,0 +1,48 @@
+// dm 服务（设备管理）集群节点查询接口的精简定义。
+//
+// stateflux 的 dispatch 只用到一个接口：ListClusterNodesStatus。本文件从 dm 服务
+// 的 api/dm/service/v1/service.proto 中抽出该接口及其消息，proto 包名、服务名、
+// 方法名与字段编号与原定义保持一致，线上互通（gRPC 方法全名由 proto 包名决定，
+// 故目录拍平到 api/dm 只改 Go 导入路径，package 不随之改动）；其余接口未收录，
+// 需要时按同样方式补充。
+//
+// 生成码（service.pb.go / service_grpc.pb.go）随仓库提交，重新生成：make api，
+// 或在仓库根目录：
+//
+//	protoc --go_out=. --go_opt=paths=source_relative \
+//	  --go-grpc_out=. --go-grpc_opt=paths=source_relative \
+//	  api/dm/service.proto
+syntax = "proto3";
+
+package api.dm.service.v1;
+
+import "google/protobuf/empty.proto";
+
+option go_package = "github.com/improvtrace/stateflux/api/dm;dmpb";
+
+// ServiceService 是 dm 服务的内部接口（仅收录集群节点状态查询）。
+service ServiceService {
+  // 获取集群节点状态
+  rpc ListClusterNodesStatus(google.protobuf.Empty)
+      returns (ListClusterNodesStatusResponse);
+}
+
+message ListClusterNodesStatusResponse {
+  message Node {
+    // 节点ID
+    string id = 1;
+    // 节点IP
+    string ip = 2;
+    // 节点业务IP
+    string business_ip = 6;
+    // 节点角色
+    string role = 3;
+    // 是否在线
+    bool online = 4;
+    // 节点名称
+    string name = 5;
+  }
+  repeated Node nodes = 1;
+  // 本节点ID
+  string node_id = 2;
+}
