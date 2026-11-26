@@ -1,81 +1,74 @@
-.PHONY: build vet fmt api generate wire clean install docker
+.PHONY: help build test integration deps deps-clean vet fmt generate ent wire api migrate clean
 
 GO ?= go
 
-# 目标平台与产物根目录（交叉编译示例：make install GOOS=linux GOARCH=arm64）
-GOOS ?= $(shell $(GO) env GOOS)
-GOARCH ?= $(shell $(GO) env GOARCH)
-DIST_DIR ?= dist
+# 二进制输出目录（/bin/ 已被 .gitignore 排除）；交叉编译示例：make build GOOS=linux GOARCH=arm64
+BIN_DIR ?= bin
 
-# 版本唯一来源：build/version 末行（${alias}.${major}.${minor}，如 chronos.0.1）。
-# 该文件经 go:embed 嵌入二进制（根包 embed.go），产物命名与二进制 --version 自动一致，
-# 因此不接受命令行覆盖（覆盖会破坏「产物名 = 二进制版本」的约定）。
-VERSION := $(shell tail -n 1 build/version 2>/dev/null | tr -d '[:space:]')
-ifeq ($(strip $(VERSION)),)
-VERSION := unknown
-endif
-COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
-BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
-export COMMIT BUILD_DATE
-# commit / builddate 编译注入（version 来自嵌入的 build/version，无需注入）。
-LDFLAGS ?= -s -w -X github.com/improvtrace/stateflux/pkg/buildinfo.Commit=$(COMMIT) -X github.com/improvtrace/stateflux/pkg/buildinfo.Date=$(BUILD_DATE)
+# 追加给 go test 的参数，例如 make test TEST_FLAGS=-race（-race 需要 cgo）
+TEST_FLAGS ?=
 
-# api/ 下全部 proto（自动发现，含以后新增的文件）；$(sort) 保证稳定顺序
-API_PROTO_FILES := $(shell find api -name '*.proto' 2>/dev/null | sort)
-# protoc include 路径：仓库根（模块内相互 import）+ third_party/（第三方 proto 依赖，
-# 如 google/protobuf 与网关注解等，目录存在则生效）
-API_INCLUDES := -I. $(if $(wildcard third_party),-Ithird_party)
+build: ## 构建 stateflux、datamigrate 与 mock-dm 到 bin/
+	$(GO) build -o $(BIN_DIR)/ ./cmd/datamigrate ./cmd/mock-dm ./cmd/stateflux
 
-build:
-	@mkdir -p $(DIST_DIR)/bin
-	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(DIST_DIR)/bin/stateflux ./cmd
+help: ## 显示全部目标
+	@awk 'BEGIN {FS = ":.*##"; printf "用法: make <目标>\n"} /^[a-zA-Z0-9_-]+:.*##/ {printf "  make %-14s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-vet:
-	$(GO) vet ./...
+# -count=1 不走测试缓存，保证每次都真实执行。
+test: ## 单元测试（不含 examples 集成场景，见 integration）
+	$(GO) test -count=1 $(TEST_FLAGS) ./...
 
-fmt:
+# 依赖不可达时用例整体 Skip 而不算失败：通过但全是 SKIP 时，先检查依赖。
+integration: ## 集成测试：migrations 建库迁移 + examples 场景（需先 make deps）
+	$(GO) test -tags=integration -count=1 -v $(TEST_FLAGS) ./migrations/ ./examples/
+
+# 复用 examples/maintain.sh（幂等）：容器已在运行则不动；端口已被其他服务占用
+# （如原生 redis-server / postgresql）时直接复用该服务，uninstall 也不会动它。
+deps: ## 以 Docker 容器部署 examples 依赖（PostgreSQL + Redis）
+	./examples/maintain.sh install
+
+deps-clean: ## 停止并删除 examples 依赖容器（连同数据卷）
+	./examples/maintain.sh uninstall
+
+# examples 场景与 migrations 的集成测试带 integration 构建标签：不带标签时 go vet
+# 与 go test 都不会编译它，因此这里带上标签，不跑用例也能静态检查到。
+vet: ## go vet（带 integration 标签，覆盖 examples 场景与 migrations 集成测试代码）
+	$(GO) vet -tags=integration ./...
+
+fmt: ## gofmt 格式化全部 Go 源码
 	gofmt -w .
 
-# 需要 protoc >= 25 及 protoc-gen-go / protoc-gen-go-grpc（PATH 内）。
-# 契约统一在 api/ 下，go_package 决定输出路径（module 模式，生成码与 proto 同目录）；
-# 单次调用传入全部 proto：跨文件 import 与公共消息只需声明一次。
-api:
-ifneq ($(strip $(API_PROTO_FILES)),)
-	protoc $(API_INCLUDES) \
-		--go_out=. --go_opt=module=github.com/improvtrace/stateflux \
-		--go-grpc_out=. --go-grpc_opt=module=github.com/improvtrace/stateflux \
+# 生成码（ent / wire / protobuf）均随仓库提交，克隆后无需生成即可构建；修改来源后重新生成：
+#   states/ent/schema  → make ent（参数以 states/ent/generate.go 的 go:generate 指令为准）
+#   entry.go（ProviderSet）→ make wire
+#   api/ 下的 proto    → make api
+generate: ent wire ## 重新生成 ent 与 wire 代码（不含 protobuf，见 api）
+
+ent: ## 由 states/ent/schema 重新生成 ent 代码
+	$(GO) generate ./states/ent
+
+# wire 已声明为 go.mod 的 tool 依赖：go tool 按模块版本解析，不依赖 PATH 上的安装。
+wire: ## 重新生成 wire_gen.go（注入器在根包 wire.go）
+	$(GO) tool github.com/google/wire/cmd/wire .
+
+# api/ 下全部 proto（自动发现，含以后新增的文件），生成码与 proto 同目录入库。
+# 需要 protoc 及 protoc-gen-go / protoc-gen-go-grpc 在 PATH 内。
+API_PROTO_FILES := $(shell find api -name '*.proto' 2>/dev/null | sort)
+
+api: ## 由 api/ 下的 proto 重新生成 Go 代码
+	protoc --go_out=. --go_opt=paths=source_relative \
+		--go-grpc_out=. --go-grpc_opt=paths=source_relative \
 		$(API_PROTO_FILES)
-else
-	@echo "api/ 下没有 .proto 文件，跳过生成"
-endif
 
-# wire 依赖注入代码生成（§15.1#1）：需要 github.com/google/wire/cmd/wire 在 PATH 内。
-wire:
-	$(GO) tool github.com/google/wire/cmd/wire ./cmd/stateflux
+# 修改 states/ent/schema 后生成增量迁移（先 make ent）：写入 migrations/<时间戳>_<名称>.sql
+# 并更新 atlas.sum，schema 无变更时不产文件。开发库必须是空库（仅用于计算 diff，用完即清），
+# DSN 经环境变量 STATEFLUX_DEV_URL 给出：
+#   STATEFLUX_DEV_URL='postgres://postgres:postgres@127.0.0.1:5432/stateflux_dev?sslmode=disable' \
+#     make migrate MIGRATION_NAME=add_xxx
+MIGRATION_NAME ?= changes
 
-# ent 代码生成（schema 位于 internal/domain/schema，输出至 internal/domain/data/ent；
-# 生成码不入库——.gitignore 已排除，克隆/拉取后需先执行本目标）
-# 特性：sql/upsert（CreateBulk + OnConflict 幂等批量写）、sql/lock（FOR UPDATE fencing）、
-# sql/execquery（认领挪行等原生 SQL 经 ent 连接执行）
-generate:
-	$(GO) tool entgo.io/ent/cmd/ent generate --feature sql/upsert,sql/lock,sql/execquery \
-		./internal/domain/schema --target ./internal/domain/data/ent
+migrate: ## 生成增量迁移：make migrate MIGRATION_NAME=<名称>（DSN 取环境变量 STATEFLUX_DEV_URL）
+	$(GO) run migrations/gen/main.go -name $(MIGRATION_NAME)
 
-# 构建 .tar.gz 发布安装包（build/package.sh）：包内布局与安装后目录一致
-# （bin/stateflux + conf/config.yaml + VERSION），另带 install.sh / upgrade.sh /
-# downgrade.sh；解压后 sudo ./install.sh 安装到 /usr/local/stateflux。Docker 镜像构建
-# （make docker）复用同一打包+安装路径。产物：
-# $(DIST_DIR)/package/stateflux-<version>-<os>-<arch>.tar.gz（version 来自 build/version）。
-install:
-	./build/package.sh $(GOOS) $(GOARCH) $(DIST_DIR)/package
-
-# 构建并导出 Docker 镜像（build/docker.sh）：tag stateflux:<version>（附 latest），
-# 镜像内走与 install 相同的打包+安装路径；导出 $(DIST_DIR)/image/ 下含 version 的
-# tar.gz（docker save）。镜像平台固定 linux，GOARCH 决定架构。
-# 运行时基础镜像默认 alpine:3.22（Docker Hub 可达）；网络可达 gcr.io 时可换 distroless：
-#   make docker RUNTIME_IMAGE=gcr.io/distroless/static-debian12:nonroot
-docker:
-	./build/docker.sh $(GOARCH) $(DIST_DIR)/image
-
-clean:
-	rm -rf $(DIST_DIR)/ bin/
+clean: ## 删除构建产物（bin/）
+	rm -rf $(BIN_DIR)

@@ -1,9 +1,0 @@
-.git
-.docs
-.zcode
-bin
-dist
-.stateflux-wal
-hack
-internal/test
-stateflux
