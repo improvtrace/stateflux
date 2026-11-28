@@ -68,6 +68,7 @@ func Spec(f *Forwarder) *tasks.TaskSpec {
 	return &tasks.TaskSpec{
 		Resource:      Resource,
 		SignatureName: TaskName,
+		Enabled:       true,
 		Concurrency:   4,
 		Handler:       f.Handle,
 		Timeout:       30 * time.Second,

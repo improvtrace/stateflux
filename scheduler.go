@@ -316,10 +316,20 @@ func (p *Publisher) Dispatch(ctx context.Context, batch []tasks.DispatchableTask
 }
 
 // DispatchPending 认领并发布一批 pending 行（恢复通道）：resources 为空 =
-// 全部资源。逐行组装 Signature 并发布，成功的行记账后 MarkDispatched，失败
-// 的行 Requeue 回 pending（下一轮恢复通道重试）。
+// 全部启用的资源（TaskSpec.Enabled；禁用任务的行不认领，冻结在 pending，
+// 重新启用后由本通道带走）。逐行组装 Signature 并发布，成功的行记账后
+// MarkDispatched，失败的行 Requeue 回 pending（下一轮恢复通道重试）。
 func (p *Publisher) DispatchPending(ctx context.Context, resources []string) {
 	start := time.Now()
+	if len(resources) == 0 {
+		for _, ts := range p.reg.Enabled() {
+			resources = append(resources, ts.Resource)
+		}
+		if len(resources) == 0 {
+			slog.Debug("schedule: no enabled tasks, skip dispatching pending rows")
+			return
+		}
+	}
 	rows, err := p.repo.ClaimPending(ctx, &states.TaskPersistentClaim{
 		Resources: resources,
 		Batch:     defaultDispatchBatch,

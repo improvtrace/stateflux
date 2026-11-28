@@ -22,21 +22,26 @@ const defaultFactoryBatch = 100
 // TaskSpec 是一类业务任务的完整描述：怎么执行（Handler）、以什么资源路由
 // （Resource，队列按 资源×节点 划分）、失败怎么重试（Retries，由 queue 框架
 // 承担）、是否需要可靠性保障（Durable，dispatch 前落 task_persistents）、
-// 到点怎么生成（Factory）。一切路由以 Resource 为键；消费并发随本结构声明
-// ——新增任务只需本结构，无需改框架。
+// 到点怎么生成（Factory）、是否随服务启用（Enabled）。一切路由以 Resource
+// 为键；消费并发随本结构声明——新增任务只需本结构，无需改框架。
 type TaskSpec struct {
-	Resource      string          // 任务资源名，= task_persistents.resource，全局唯一；路由 header AttributeResource
-	SignatureName string          // handler 注册名（Signature.Name），空 = Resource；转发类任务的资源名与 handler 名不同时使用
-	Concurrency   int             // 消费端并发数（<=0 取 DefaultConcurrency），本资源在本节点队列上的 worker 并发
-	Handler       any             // 处理函数，约定签名 func(payload string, taskID int64) error，见 Validate
-	Timeout       time.Duration   // 单次执行预算，<=0 时 NewRow 取 1 分钟
-	Retries       int             // 执行内重试次数，映射 Signature.RetryCount，由 queue 框架执行
-	MaxAttempts   int32           // 最大重试次数落表值（重试由异步任务框架实施），<=0 时 NewRow 取 3
-	Durable       bool            // 是否落 task_persistents（dispatch 前持久化，支持重启恢复）；false = 无状态直发
-	Payload       json.RawMessage // 非 Durable 定时任务的固定参数，直发时作为 payload 传入
-	Cron          string          // 可选：cron 表达式（robfig/cron v3，五段或 @every 等描述符），到点触发
-	FactoryBatch  int             // Factory 单批生成量，<=0 时取缺省 100
-	Factory       Factory         // 可选：Durable 定时任务到点生成待发布批次
+	Resource      string // 任务资源名，= task_persistents.resource，全局唯一；路由 header AttributeResource
+	SignatureName string // handler 注册名（Signature.Name），空 = Resource；转发类任务的资源名与 handler 名不同时使用
+	// Enabled 是否随服务启用（零值即禁用）：false = 本进程不调度该任务——不注册
+	// cron 条目、不启动 worker，恢复通道也跳过其 pending 行（冻结在 pending，
+	// 重新启用后由恢复通道带走）。任务必须显式声明 Enabled: true：bool 无三态，
+	// 宁可让「忘了写 = 永远不执行」在清单里显式可见，也不做静默缺省。
+	Enabled      bool
+	Concurrency  int             // 消费端并发数（<=0 取 DefaultConcurrency），本资源在本节点队列上的 worker 并发
+	Handler      any             // 处理函数，约定签名 func(payload string, taskID int64) error，见 Validate
+	Timeout      time.Duration   // 单次执行预算，<=0 时 NewRow 取 1 分钟
+	Retries      int             // 执行内重试次数，映射 Signature.RetryCount，由 queue 框架执行
+	MaxAttempts  int32           // 最大重试次数落表值（重试由异步任务框架实施），<=0 时 NewRow 取 3
+	Durable      bool            // 是否落 task_persistents（dispatch 前持久化，支持重启恢复）；false = 无状态直发
+	Payload      json.RawMessage // 非 Durable 定时任务的固定参数，直发时作为 payload 传入
+	Cron         string          // 可选：cron 表达式（robfig/cron v3，五段或 @every 等描述符），到点触发
+	FactoryBatch int             // Factory 单批生成量，<=0 时取缺省 100
+	Factory      Factory         // 可选：Durable 定时任务到点生成待发布批次
 }
 
 // HandlerName 返回 handler 注册名（Signature.Name）：未显式指定 SignatureName
@@ -159,11 +164,25 @@ func (r *Registry) Handlers() map[string]any {
 	return handlers
 }
 
-// Timed 返回配置了 Cron 的任务定义，定时调度器构建时用。
+// Timed 返回启用且配置了 Cron 的任务定义，定时调度器构建时用：禁用任务不注册
+// cron 条目（TaskSpec.Enabled）。
 func (r *Registry) Timed() []*TaskSpec {
 	var specs []*TaskSpec
 	for _, spec := range r.specs {
-		if spec.Cron != "" {
+		if spec.Cron != "" && spec.Enabled {
+			specs = append(specs, spec)
+		}
+	}
+	return specs
+}
+
+// Enabled 返回启用的任务定义（TaskSpec.Enabled）：worker 启动与恢复通道
+// （Publisher.DispatchPending）只作用于这些任务。禁用任务仍可经 Get/Specs
+// 查询，其表行由恢复通道冻结在 pending。
+func (r *Registry) Enabled() []*TaskSpec {
+	var specs []*TaskSpec
+	for _, spec := range r.specs {
+		if spec.Enabled {
 			specs = append(specs, spec)
 		}
 	}

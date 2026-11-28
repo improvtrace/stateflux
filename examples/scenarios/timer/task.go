@@ -16,6 +16,7 @@ import (
 const (
 	durableResource  = "echo_durable"
 	periodicResource = "echo_periodic"
+	disabledResource = "echo_disabled" // 禁用任务（Enabled=false），验证框架不调度它
 )
 
 // durableCron 是 Durable 任务的定时表达式：@every 描述符表达亚分钟节奏，
@@ -83,6 +84,7 @@ func (e *echoTask) Generate(ctx context.Context, batch int) ([]tasks.Dispatchabl
 func durableSpec(e *echoTask) *tasks.TaskSpec {
 	return &tasks.TaskSpec{
 		Resource:     durableResource,
+		Enabled:      true,
 		Concurrency:  1,
 		Handler:      e.handle,
 		Timeout:      time.Minute,
@@ -100,6 +102,22 @@ func periodicSpec(e *echoTask) *tasks.TaskSpec {
 	payload, _ := json.Marshal(echoPayload{N: 7})
 	return &tasks.TaskSpec{
 		Resource:    periodicResource,
+		Enabled:     true,
+		Concurrency: 1,
+		Handler:     e.handle,
+		Cron:        "@every 1s",
+		Payload:     payload,
+	}
+}
+
+// disabledSpec 禁用的定时任务（Enabled=false）：表达式与 periodic 同频，若框架
+// 未按 Enabled 过滤（不注册 cron 条目、不启动 worker），它会与 periodic 一样
+// 持续直发，场景以「零执行」断言暴露。
+func disabledSpec(e *echoTask) *tasks.TaskSpec {
+	payload, _ := json.Marshal(echoPayload{N: 9})
+	return &tasks.TaskSpec{
+		Resource:    disabledResource,
+		Enabled:     false,
 		Concurrency: 1,
 		Handler:     e.handle,
 		Cron:        "@every 1s",
