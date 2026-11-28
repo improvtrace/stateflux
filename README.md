@@ -46,7 +46,8 @@ stateflux/                       # 根包 package schedule：entry（Run + wire 
 │   ├── reconcile.go             #   对账：在途超时收敛 + pending 重派
 │   └── ent/                     #   ent schema（表结构的唯一来源）与生成码
 └── tasks/                       # 任务定义核心包（TaskSpec/Registry/Factory）；业务任务按目录新增
-    └── persistents/             #   持久化转发消费侧：persistent_forward 落表后重发（不生产任务）
+    ├── persistents/             #   持久化转发消费侧：persistent_forward 落表后重发（不生产任务）
+    └── sayhello/                #   内置演示任务：每 30s 发一句问候语（非 Durable 直发，一目录一任务的在库样板）
 ```
 
 ## 运行

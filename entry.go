@@ -21,6 +21,7 @@ import (
 	"github.com/improvtrace/stateflux/states"
 	"github.com/improvtrace/stateflux/tasks"
 	"github.com/improvtrace/stateflux/tasks/persistents"
+	"github.com/improvtrace/stateflux/tasks/sayhello"
 )
 
 // Config 是调度器的组装参数，经 wire（InitializeRuntime）流入各 provider。
@@ -64,6 +65,12 @@ func Run(ctx context.Context, cfg Config) error {
 	specs := rt.Registry.Specs()
 	if len(specs) == 0 {
 		return errors.New("schedule: task registry is empty")
+	}
+	// 后续一切调度只作用于启用的任务（TaskSpec.Enabled）：cron 条目、worker
+	// 与恢复通道都以 Enabled() 为准；禁用任务的表行冻结在 pending。
+	specs = rt.Registry.Enabled()
+	if len(specs) == 0 {
+		return errors.New("schedule: all tasks are disabled")
 	}
 	slog.Info("schedule: runtime assembled",
 		"resources", len(specs),
@@ -136,7 +143,7 @@ func start(wg *sync.WaitGroup, fn func() error) {
 // 启动一个消费者，并排空 worker 的错误通道。发布侧由 dispatch 按同一约定
 // 路由，任务只会落入目标节点自己的队列。
 func launchWorkers(ctx context.Context, server *queue.Server, reg *tasks.Registry, node string) error {
-	specs := reg.Specs()
+	specs := reg.Enabled() // 禁用任务不启动消费者（任务保留在注册表供 Get 查询）
 	errCh := make(chan error, len(specs))
 	go func() {
 		for {
@@ -169,7 +176,7 @@ func launchWorkers(ctx context.Context, server *queue.Server, reg *tasks.Registr
 // 断言成立由 TaskSpec.Validate 的签名约定保证。
 func handlers(ctx context.Context, repo states.TaskPersistentRepo, reg *tasks.Registry) map[string]any {
 	wctx := context.WithoutCancel(ctx)
-	specs := reg.Specs()
+	specs := reg.Enabled() // 禁用任务不注册 handler（worker 也不启动，见 launchWorkers）
 	out := make(map[string]any, len(specs))
 	for _, ts := range specs {
 		raw := ts.Handler.(func(string, int64) error)
@@ -235,13 +242,14 @@ type Runtime struct {
 }
 
 // NewSpecs 汇总任务清单——任务注册的直接维护点：新增任务 = 在 tasks/ 下
-// 新建目录（含 ProviderSet 与依赖注入构造器），并在此加 import 与一行。
-// wire 无多绑定能力，清单是显式枚举；任务依赖经各自构造器注入。
-// 当前只注册 persistents 持久化转发的消费侧（不生产任务），handler 名为
-// persistent_forward，由 Dispatcher 投递给 leader 节点。
+// 新建目录（无依赖的任务直接提供 Spec()，有依赖的经各自构造器注入），并在
+// 此加 import 与一行。wire 无多绑定能力，清单是显式枚举。
+// 当前注册：persistents 持久化转发的消费侧（不生产任务）与 sayhello 演示
+// 任务（@every 30s 问候语，非 Durable 直发）。
 func NewSpecs(forwarder *persistents.Forwarder) []*tasks.TaskSpec {
 	return []*tasks.TaskSpec{
 		persistents.Spec(forwarder),
+		sayhello.Spec(),
 	}
 }
 

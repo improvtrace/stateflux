@@ -208,7 +208,9 @@ func (r *Runtime) Stop() { r.stop() }
 // StartRuntime 按入口 Run 的顺序装配并启动调度器（装配顺序对照
 // wire_gen.go，生命周期对照 entry.go Run）：注册 handler → 首轮对账（消化
 // 崩溃残留并重派未完成行）→ worker → listener/cron/reconciler。registry 由
-// 调用方指定，间隔与 grace 用 examples 短值，供场景细粒度验证。
+// 调用方指定，间隔与 grace 用 examples 短值，供场景细粒度验证。禁用任务
+// （TaskSpec.Enabled=false）与入口同语义：不注册 handler、不启动 worker，
+// cron 条目由 Registry.Timed 过滤。
 func (h *H) StartRuntime(t *testing.T, specs []*tasks.TaskSpec) *Runtime {
 	t.Helper()
 	reg, err := tasks.NewRegistry(specs...)
@@ -245,9 +247,12 @@ func (h *H) StartRuntime(t *testing.T, specs []*tasks.TaskSpec) *Runtime {
 		Reconciler:    reconciler,
 	}
 
-	// 与 entry.go handlers 一致的成功内联回写包装
+	// 与 entry.go handlers 一致的成功内联回写包装（禁用任务不注册）
 	handlers := make(map[string]any, len(specs))
 	for _, ts := range specs {
+		if !ts.Enabled {
+			continue
+		}
 		raw := ts.Handler.(func(string, int64) error)
 		handlers[ts.HandlerName()] = func(payload string, taskID int64) error {
 			if err := raw(payload, taskID); err != nil {
@@ -294,6 +299,9 @@ func (h *H) StartRuntime(t *testing.T, specs []*tasks.TaskSpec) *Runtime {
 		}
 	}()
 	for _, spec := range specs {
+		if !spec.Enabled {
+			continue // 禁用任务不启动消费者（TaskSpec.Enabled）
+		}
 		concurrency := spec.Concurrency
 		if concurrency <= 0 {
 			concurrency = tasks.DefaultConcurrency
@@ -321,9 +329,10 @@ func (h *H) StartRuntime(t *testing.T, specs []*tasks.TaskSpec) *Runtime {
 }
 
 // StartEntry 以真实入口 schedule.Run 启动调度器（注册表为 wire 装配的默认
-// 任务：持久化转发消费侧），用于冒烟验证 entry 生命周期与停机语义。节点 ID
-// 由入口经 dm 桩的 ListClusterNodesStatus 获取（node_id = NodeName）。返回
-// 退出错误通道（ctx 取消时收到 ctx.Err()）与停止函数。
+// 任务：持久化转发消费侧 + sayhello 演示任务），用于冒烟验证 entry 生命周期
+// 与停机语义。节点 ID 由入口经 dm 桩的 ListClusterNodesStatus 获取
+// （node_id = NodeName）。返回退出错误通道（ctx 取消时收到 ctx.Err()）与
+// 停止函数。
 func (h *H) StartEntry(t *testing.T) (<-chan error, context.CancelFunc) {
 	t.Helper()
 	cfg := schedule.Config{

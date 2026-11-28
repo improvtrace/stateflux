@@ -1,6 +1,7 @@
 // Package timer 定时触发场景：非 Durable 定时任务直发不过表（taskID 恒 0）；
-// Durable 任务经 CronEvent 走 factory 落表并立即发布，重复 tick 由幂等键去重。
-// 亚分钟节奏用 @every 描述符表达，与五段 cron 走同一 CronScheduler 代码路径。
+// Durable 任务经 CronEvent 走 factory 落表并立即发布，重复 tick 由幂等键去重；
+// 禁用任务（Enabled=false）不注册 cron 条目，场景窗口内零执行。亚分钟节奏用
+// @every 描述符表达，与五段 cron 走同一 CronScheduler 代码路径。
 package timer
 
 import (
@@ -14,11 +15,12 @@ import (
 	"github.com/improvtrace/stateflux/tasks"
 )
 
-// Test 定时直发与定时落表。
+// Test 定时直发、定时落表与禁用任务。
 func Test(h *examples.H, t *testing.T) {
 	periodic := newEchoTask()
 	durable := newEchoTask()
-	rt := h.StartRuntime(t, []*tasks.TaskSpec{durableSpec(durable), periodicSpec(periodic)})
+	disabled := newEchoTask()
+	rt := h.StartRuntime(t, []*tasks.TaskSpec{durableSpec(durable), periodicSpec(periodic), disabledSpec(disabled)})
 	defer rt.Stop()
 
 	// 非 Durable：两个周期内至少两次直发，payload 为 TaskSpec 固定参数
@@ -40,4 +42,8 @@ func Test(h *examples.H, t *testing.T) {
 	time.Sleep(2500 * time.Millisecond)
 	assert.Equal(t, 5, h.CountRows(t, durableResource), "重复 tick 不应新增行")
 	assert.Len(t, durable.snapshot(), 5, "重复 tick 不应重复执行")
+
+	// 禁用任务：至此场景已跨 ≥ 3 个触发周期，零执行、零落表
+	assert.Empty(t, disabled.snapshot(), "Enabled=false 的任务不应被调度执行")
+	assert.Zero(t, h.CountRows(t, disabledResource), "禁用任务不应有落表行")
 }

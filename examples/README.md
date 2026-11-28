@@ -74,7 +74,7 @@ go test -tags=integration -v -run 'Test/定时触发' ./examples/   # 单场景
 | case（scenarios/） | 验证点 |
 |---|---|
 | smoke | `schedule.Run` 真实入口（以持久化转发行驱动）：落表 → 启动恢复重派 → 两阶段发布 → 分节点路由 → 转发任务执行 → 成功内联回写 → 停机返回 ctx.Err() |
-| timer | 非 Durable 定时直发不过表（taskID=0、固定 Payload）；Durable 定时经 factory 落表并发布，重复 tick 幂等去重 |
+| timer | 非 Durable 定时直发不过表（taskID=0、固定 Payload）；Durable 定时经 factory 落表并发布，重复 tick 幂等去重；禁用任务（Enabled=false）不注册 cron，场景窗口内零执行 |
 | failure | Retries 执行内重试耗尽仍失败 → 保持 dispatched → 对账按 backend FAILURE 收敛 failed（ErrorSummary/FinishedAt） |
 | startup_recovery | 服务重启后（Redis 全丢）首轮对账：pending/dispatching/dispatched 未完成行全部重派并恰好执行一次 |
 

@@ -54,6 +54,7 @@ stateflux/                        # 根包 package schedule（import 路径 gith
 │   ├── task.go                   #   TaskSpec/Registry/NewRow/Validate（handler 签名约定）
 │   ├── payload.go                #   Encode/Decode（单 string Arg 承载 JSON）
 │   ├── factory.go                #   Factory 接口：产出 []DispatchableTask{Task, Sig}
+│   ├── sayhello/sayhello.go      #   内置演示任务：@every 30s 问候语（非 Durable 直发，一目录一任务的在库样板）
 │   └── persistents/              #   持久化转发的消费侧（不生产任务）
 │       └── persistents.go        #   persistent_forward：落表 → 认领 → 重发 → 确认
 ├── states/                       # [已实装] 调度事实源的数据访问（package states）
@@ -102,7 +103,9 @@ stateflux/                        # 根包 package schedule（import 路径 gith
 实装于 `tasks/`（核心包）；业务任务由接入方在 `tasks/` 下按目录新增
 （一目录一任务：Resource 常量、Payload、Spec()、Handler、Factory，并按需
 提供 ProviderSet）。
-`TaskSpec` 关键字段：`Retries`（执行内重试，映射 `Signature.RetryCount`，由
+`TaskSpec` 关键字段：`Enabled`（是否随服务启用，零值即禁用：不注册 cron、
+不启动 worker、恢复通道冻结其 pending 行，见 D19）、`Retries`（执行内重试，映射
+`Signature.RetryCount`，由
 queue 框架承担）、`MaxAttempts`（重试预算落表值）、`Durable`（是否落
 task_persistents）、`Payload`（非 Durable 定时任务的固定参数）、`Cron`
 （定时触发，robfig/cron v3 表达式，五段或 @every 等描述符）、
@@ -166,7 +169,8 @@ Create/Get/ClaimPending/Claim/MarkDispatched/MarkTerminal/Requeue/Inflight；ent
 type Publisher struct{ repo, disp, reg, ledger, node }
 
 // DispatchPending：ClaimPending（FOR UPDATE SKIP LOCKED，resources 空 =
-// 全部资源）→ 逐行组装 Signature（RoutingKey 留空，headers 由表行的目标
+// 全部启用资源，禁用任务的行冻结在 pending）→ 逐行组装 Signature（RoutingKey
+// 留空，headers 由表行的目标
 // 节点属性生成，见 §3.4 的 Attribute 表；label 非法则组装失败、不发布）→
 // dispatch.Dispatch（匹配节点表生成 queue:<resource>/<node>）→ 成功 ledger
 // 记账，批量 MarkDispatched；失败 Requeue 回 pending。
@@ -363,6 +367,17 @@ JSON, taskID]、headers 携带 Attribute 路由属性）并标记 AttributePersi
   重试与对账恢复通道兜底；请求方可经 Dispatch 返回的 AsyncResult 查询转发
   状态。`TaskSpec.SignatureName` 为此把资源名（路由）与 handler 注册名分离
   （persistents vs persistent_forward）。
+
+- **D19 任务开关：TaskSpec.Enabled 显式声明，零值即禁用**。false = 本进程不
+  调度该任务：Registry.Timed 不注册 cron 条目，worker 不为其启动消费者，
+  恢复通道 DispatchPending(nil) 把空 resources 收敛为启用资源集合——禁用
+  任务的 pending 行冻结在表里，重新启用后由恢复通道自然带走（生产方经转发
+  提交禁用资源的行只多一次 leader 重发，同样冻结）。bool 无三态，缺省启用
+  无法表达，宁可让任务作者显式写 Enabled: true，遗漏即任务不执行（启动日志
+  的 resources/timed_resources 数与集成场景会暴露），不做静默缺省。同时在
+  NewSpecs 注册内置演示任务 sayhello（@every 30s 问候语，非 Durable 直发，
+  一目录一任务的在库样板）——修订 D6 的绝对化表述：框架不内置真实业务任务，
+  保留一个最小演示任务。
 
 ### 后续待做（无待决项）
 

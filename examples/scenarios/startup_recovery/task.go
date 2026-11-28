@@ -55,6 +55,7 @@ func (e *echoTask) handle(payload string, taskID int64) error {
 func echoSpec(e *echoTask) *tasks.TaskSpec {
 	return &tasks.TaskSpec{
 		Resource:    echoResource,
+		Enabled:     true,
 		Concurrency: 1,
 		Handler:     e.handle,
 		Timeout:     time.Minute,
