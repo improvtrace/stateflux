@@ -1,0 +1,216 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1034" height="1383" viewBox="0 0 1034 1383" role="img" aria-labelledby="sf-title sf-desc">
+<title id="sf-title">stateflux 数据流</title>
+<desc id="sf-desc">cron 到点后经 Listener 分流：Durable 任务由 Publisher 落表并两阶段发布，Dispatcher 按集群节点表路由到 queue:&lt;resource&gt;/&lt;node&gt;，Worker 执行后回写终态，Reconciler 对账收敛与重派；非 Durable 任务直发；持久化转发经 leader 落表重发。</desc>
+<defs><style type="text/css"><![CDATA[
+text{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC','Source Han Sans SC',sans-serif;font-size:12.5px}.sf-h1{font-size:18px;font-weight:600}.sf-sec{font-size:14px;font-weight:600}.sf-tt{font-size:13.5px;font-weight:600}.sf-m{font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace;font-size:11.5px;font-weight:500}.sf-s .sf-m{font-size:10.5px}.sf-rm{font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace;font-size:12.5px;font-weight:600}.sf-flow,.sf-rec,.sf-thin{fill:none}.sf-flow{stroke-width:1.4}.sf-rec{stroke-width:1.3;stroke-dasharray:5 4}.sf-thin{stroke-width:1}.sf-card,.sf-sp,.sf-sr,.sf-sx{stroke-width:1.3}.sf-panel,.sf-note{stroke-width:1}.sf-frame{fill:none;stroke-width:1;stroke-dasharray:5 4}.sf-pill,.sf-cron{stroke-width:1.2}.sf-row{stroke-width:1.2}
+.sf-bg{fill:#ffffff}text{fill:#1f2328}.sf-lab{fill:#424a53;font-size:11.5px}.sf-s{fill:#59636e;font-size:11px}.sf-tag{fill:#59636e;font-size:10.5px}.sf-muted{fill:#59636e}.sf-panel,.sf-note{fill:#f6f8fa;stroke:#d1d9e0}.sf-frame{stroke:#d1d9e0}.sf-card{fill:#ffffff;stroke:#d1d9e0}.sf-row{fill:#ffffff;stroke:#0969da}.sf-flow{stroke:#59636e}.sf-thin{stroke:#59636e}.sf-rec{stroke:#cf222e}.sf-mk{fill:#59636e}.sf-mkt{fill:#59636e}.sf-mkr{fill:#cf222e}.sf-sp{fill:#ddf4ff;stroke:#0969da}.sf-sr{fill:#e0f1f1;stroke:#1b7c83}.sf-sx{fill:#f6f8fa;stroke:#59636e;stroke-dasharray:4 3}.sf-cron{stroke:#bf3989}.sf-tp{fill:#0969da}.sf-tr{fill:#1b7c83}.sf-tx{fill:#59636e}.sf-trec{fill:#cf222e}.sf-b1{stroke:#bf3989}.sf-t1{fill:#bf3989}.sf-b2{stroke:#8250df}.sf-t2{fill:#8250df}.sf-b3{stroke:#bc4c00}.sf-t3{fill:#bc4c00}.sf-b4{stroke:#1a7f37}.sf-t4{fill:#1a7f37}.sf-b5{stroke:#cf222e}.sf-t5{fill:#cf222e}
+@media (prefers-color-scheme: dark) {
+.sf-bg{fill:#0d1117}text{fill:#f0f6fc}.sf-lab{fill:#adb5bd;font-size:11.5px}.sf-s{fill:#9198a1;font-size:11px}.sf-tag{fill:#9198a1;font-size:10.5px}.sf-muted{fill:#9198a1}.sf-panel,.sf-note{fill:#151b23;stroke:#3d444d}.sf-frame{stroke:#3d444d}.sf-card{fill:#151b23;stroke:#3d444d}.sf-row{fill:#151b23;stroke:#4493f8}.sf-flow{stroke:#9198a1}.sf-thin{stroke:#9198a1}.sf-rec{stroke:#f85149}.sf-mk{fill:#9198a1}.sf-mkt{fill:#9198a1}.sf-mkr{fill:#f85149}.sf-sp{fill:#17283d;stroke:#4493f8}.sf-sr{fill:#153036;stroke:#39c5cf}.sf-sx{fill:#151b23;stroke:#9198a1;stroke-dasharray:4 3}.sf-cron{stroke:#db61a2}.sf-tp{fill:#4493f8}.sf-tr{fill:#39c5cf}.sf-tx{fill:#9198a1}.sf-trec{fill:#f85149}.sf-b1{stroke:#db61a2}.sf-t1{fill:#db61a2}.sf-b2{stroke:#ab7df8}.sf-t2{fill:#ab7df8}.sf-b3{stroke:#db6d28}.sf-t3{fill:#db6d28}.sf-b4{stroke:#3fb950}.sf-t4{fill:#3fb950}.sf-b5{stroke:#f85149}.sf-t5{fill:#f85149}
+}
+]]></style><marker id="sf-arrow" viewBox="0 0 10 10" refX="9.5" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path class="sf-mk" d="M0 0.5 L9.5 5 L0 9.5 Z"/></marker><marker id="sf-arrow-rec" viewBox="0 0 10 10" refX="9.5" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path class="sf-mkr" d="M0 0.5 L9.5 5 L0 9.5 Z"/></marker><marker id="sf-arrow-thin" viewBox="0 0 10 10" refX="9.5" refY="5" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto"><path class="sf-mkt" d="M0 0.5 L9.5 5 L0 9.5 Z"/></marker></defs>
+<rect class="sf-bg" x="0" y="0" width="1034" height="1383"/>
+<rect class="sf-card sf-b1" x="296" y="127" width="398" height="67" rx="7"/>
+<text class="sf-tt sf-t1" x="310" y="147">CronScheduler · 定时触发</text>
+<text class="sf-tag" x="680" y="147" text-anchor="end">scheduler.go</text>
+<text class="sf-b" x="310" y="165"><tspan class="sf-m">TaskSpec.Cron</tspan>&#160;到点（robfig/cron，支持&#160;<tspan class="sf-m">@every</tspan>）</text>
+<text class="sf-b" x="310" y="181.5">tick 前抢 Redis 短锁（SETNX），多节点只触发一个</text>
+<rect class="sf-card sf-b1" x="296" y="234" width="398" height="50.5" rx="7"/>
+<text class="sf-tt sf-t1" x="310" y="254">Listener → HandleEvent</text>
+<text class="sf-tag" x="680" y="254" text-anchor="end">scheduler.go</text>
+<text class="sf-b" x="310" y="272">事件总线串行分发；按&#160;<tspan class="sf-m">TaskSpec.Durable</tspan>&#160;分流</text>
+<rect class="sf-card sf-b2" x="296" y="328.5" width="240" height="50.5" rx="7"/>
+<text class="sf-tt sf-t2" x="310" y="348.5">Factory.Generate</text>
+<text class="sf-b" x="310" y="366.5">生成批次&#160;<tspan class="sf-m">[]DispatchableTask</tspan></text>
+<rect class="sf-card sf-b3" x="554" y="328.5" width="140" height="83.5" rx="7"/>
+<text class="sf-tt sf-t3" x="564" y="348.5">非 Durable · 直发</text>
+<text class="sf-b" x="564" y="366.5">自组 Signature</text>
+<text class="sf-b" x="564" y="383">直发，<tspan class="sf-m">taskID = 0</tspan></text>
+<text class="sf-b" x="564" y="399.5">不落表、不进对账</text>
+<rect class="sf-card sf-b2" x="296" y="442" width="240" height="67" rx="7"/>
+<text class="sf-tt sf-t2" x="310" y="462">Publisher.Dispatch</text>
+<text class="sf-b" x="310" y="480"><tspan class="sf-m">repo.Create</tspan>&#160;落表（pending）</text>
+<text class="sf-b" x="310" y="496.5">幂等键冲突返回已有行</text>
+<rect class="sf-card sf-b2" x="296" y="523" width="240" height="100" rx="7"/>
+<text class="sf-tt sf-t2" x="310" y="543">Publisher.DispatchPending</text>
+<text class="sf-b" x="310" y="561"><tspan class="sf-m">ClaimPending</tspan>&#160;→ dispatching</text>
+<text class="sf-b" x="310" y="577.5">Signature：<tspan class="sf-m">UUID = task_{id}</tspan></text>
+<text class="sf-b" x="310" y="594">发布成功 →&#160;<tspan class="sf-m">MarkDispatched</tspan></text>
+<text class="sf-b" x="310" y="610.5">发布失败 →&#160;<tspan class="sf-m">Requeue</tspan>&#160;回 pending</text>
+<rect class="sf-card sf-b3" x="296" y="663" width="398" height="100" rx="7"/>
+<text class="sf-tt sf-t3" x="310" y="683">dispatch.Dispatcher</text>
+<text class="sf-tag" x="680" y="683" text-anchor="end">唯一的队列投递出口</text>
+<text class="sf-b" x="310" y="701">带&#160;<tspan class="sf-m">AttributePersistent</tspan>&#160;的签名不直投：</text>
+<text class="sf-b" x="310" y="717.5">包装成&#160;<tspan class="sf-m">persistent_forward</tspan>&#160;投给 leader（见下方）</text>
+<text class="sf-b" x="310" y="734"><tspan class="sf-m">attachRoutingKey</tspan>：按 Attribute headers 匹配节点表并选点</text>
+<text class="sf-b" x="310" y="750.5">RoutingKey =&#160;<tspan class="sf-m">queue:&lt;resource&gt;/&lt;node&gt;</tspan></text>
+<rect class="sf-card sf-b4" x="296" y="813" width="398" height="83.5" rx="7"/>
+<text class="sf-tt sf-t4" x="310" y="833">queue Worker（资源 × 节点）</text>
+<text class="sf-tag" x="680" y="833" text-anchor="end">entry.go · handlers</text>
+<text class="sf-b" x="310" y="851">只消费本节点的&#160;<tspan class="sf-m">queue:&lt;resource&gt;/&lt;node&gt;</tspan></text>
+<text class="sf-b" x="310" y="867.5">并发 =&#160;<tspan class="sf-m">Concurrency</tspan>；执行&#160;<tspan class="sf-m">handler(payload, taskID)</tspan></text>
+<text class="sf-b" x="310" y="884">成功 → 内联回写&#160;<tspan class="sf-m">MarkTerminal(succeeded)</tspan>；失败不回写</text>
+<rect class="sf-card sf-b5" x="296" y="954.5" width="398" height="83.5" rx="7"/>
+<text class="sf-tt sf-t5" x="310" y="974.5">states.Reconciler · 对账</text>
+<text class="sf-tag" x="680" y="974.5" text-anchor="end">启动首轮先于 worker</text>
+<text class="sf-b" x="310" y="992.5"><tspan class="sf-m">Inflight</tspan>&#160;扫出 dispatching / dispatched 的超时行</text>
+<text class="sf-b" x="310" y="1009">backend 有终态 →&#160;<tspan class="sf-m">MarkTerminal</tspan>，无记录 →&#160;<tspan class="sf-m">Requeue</tspan></text>
+<text class="sf-b" x="310" y="1025.5">再&#160;<tspan class="sf-m">DispatchPending(nil)</tspan>：重派全部 pending 行</text>
+<rect class="sf-frame" x="282" y="64" width="426" height="988" rx="10"/>
+<text class="sf-lab" x="296" y="79">stateflux 进程 · 每个节点各运行一份</text>
+<rect class="sf-cron sf-card" x="455" y="88" width="80" height="21" rx="10.5"/>
+<text class="sf-lab" x="495" y="102.5" text-anchor="middle">cron 到点</text>
+<path class="sf-flow" d="M495 109 L495 127" marker-end="url(#sf-arrow)"/>
+<path class="sf-flow" d="M495 194 L495 234" marker-end="url(#sf-arrow)"/>
+<text class="sf-lab" x="503" y="218">CronEvent</text>
+<path class="sf-flow" d="M416 284.5 L416 328.5" marker-end="url(#sf-arrow)"/>
+<text class="sf-lab" x="424" y="310.5">Durable</text>
+<path class="sf-flow" d="M624 284.5 L624 328.5" marker-end="url(#sf-arrow)"/>
+<text class="sf-lab" x="632" y="310.5">非 Durable</text>
+<path class="sf-flow" d="M416 379 L416 442" marker-end="url(#sf-arrow)"/>
+<text class="sf-lab" x="424" y="414.5">批次</text>
+<path class="sf-flow" d="M416 509 L416 523" marker-end="url(#sf-arrow)"/>
+<path class="sf-flow" d="M416 623 L416 663" marker-end="url(#sf-arrow)"/>
+<text class="sf-lab" x="424" y="647">Signature，RoutingKey 留空</text>
+<path class="sf-flow" d="M624 412 L624 663" marker-end="url(#sf-arrow)"/>
+<text class="sf-lab" x="632" y="428">Signature</text>
+<rect class="sf-note" x="16" y="64" width="206" height="116.5" rx="7"/>
+<text class="sf-tt" x="30" y="84">Signature · 队列消息</text>
+<text class="sf-b" x="30" y="102"><tspan class="sf-m">UUID = task_{id}</tspan>，重派不变</text>
+<text class="sf-b" x="30" y="118.5"><tspan class="sf-m">Name</tspan>：handler 注册名</text>
+<text class="sf-b" x="30" y="135"><tspan class="sf-m">Args = [payload, taskID]</tspan></text>
+<text class="sf-b" x="30" y="151.5"><tspan class="sf-m">Headers</tspan>：路由属性</text>
+<text class="sf-b" x="30" y="168"><tspan class="sf-m">RetryCount = Retries</tspan></text>
+<rect class="sf-sp" x="16" y="198.5" width="206" height="853.5" rx="9"/>
+<text class="sf-sec sf-tp" x="28" y="222.5">PostgreSQL</text>
+<text class="sf-s" x="28" y="241.5"><tspan class="sf-m">task_persistents</tspan></text>
+<text class="sf-s" x="28" y="258.5">调度事实源：一行一个持久化任务</text>
+<text class="sf-s" x="28" y="288.5">行属性 → Signature headers</text>
+<text class="sf-s" x="28" y="305">（<tspan class="sf-m">Attribute</tspan>&#160;前缀省略）</text>
+<text class="sf-s" x="28" y="321.5"><tspan class="sf-m">resource</tspan>&#160;→&#160;<tspan class="sf-m">Resource</tspan></text>
+<text class="sf-s" x="28" y="338"><tspan class="sf-m">vpc</tspan>&#160;→&#160;<tspan class="sf-m">Vpcs</tspan></text>
+<text class="sf-s" x="28" y="354.5"><tspan class="sf-m">label</tspan>&#160;→&#160;<tspan class="sf-m">Labels</tspan></text>
+<text class="sf-s" x="28" y="371"><tspan class="sf-m">node</tspan>&#160;→&#160;<tspan class="sf-m">TargetNode</tspan></text>
+<text class="sf-s" x="28" y="387.5"><tspan class="sf-m">hash_bucket</tspan>&#160;→&#160;<tspan class="sf-m">HashBucket</tspan></text>
+<text class="sf-s" x="28" y="404"><tspan class="sf-m">claimed_node</tspan>&#160;→&#160;<tspan class="sf-m">ClaimedNode</tspan></text>
+<rect class="sf-row" x="48" y="462.5" width="162" height="26" rx="13"/>
+<text class="sf-rm" x="60" y="479.9">pending</text>
+<text class="sf-s" x="198" y="479.5" text-anchor="end">待发布</text>
+<rect class="sf-row" x="48" y="538" width="162" height="26" rx="13"/>
+<text class="sf-rm" x="60" y="555.4">dispatching</text>
+<text class="sf-s" x="198" y="555" text-anchor="end">已认领</text>
+<rect class="sf-row" x="48" y="582" width="162" height="26" rx="13"/>
+<text class="sf-rm" x="60" y="599.4">dispatched</text>
+<text class="sf-s" x="198" y="599" text-anchor="end">在途</text>
+<rect class="sf-row" x="48" y="841.75" width="162" height="26" rx="13"/>
+<text class="sf-rm" x="60" y="859.15">terminal</text>
+<text class="sf-s" x="198" y="858.75" text-anchor="end">终态</text>
+<path class="sf-thin" d="M129 488.5 L129 538" marker-end="url(#sf-arrow-thin)"/>
+<path class="sf-thin" d="M129 608 L129 841.75" marker-end="url(#sf-arrow-thin)"/>
+<text class="sf-s" x="137" y="728.875">成功回写 / 对账收敛</text>
+<path class="sf-rec" d="M48 595 L34 595 L34 475.5 L48 475.5" marker-end="url(#sf-arrow-rec)"/>
+<path class="sf-rec" d="M48 551 L34 551"/>
+<text class="sf-s sf-trec" x="28" y="455.5">↩&#160;<tspan class="sf-m">Requeue</tspan>：发布失败 / 对账回收</text>
+<text class="sf-s" x="28" y="894.75">到终态的两种方式：</text>
+<text class="sf-s" x="28" y="911.25">成功：handler 包装内联回写</text>
+<text class="sf-s" x="28" y="927.75">失败：等对账按 backend 收敛</text>
+<text class="sf-s" x="28" y="994.5">在途超时行由对账收敛：</text>
+<text class="sf-s" x="28" y="1016.5">有终态 → terminal</text>
+<text class="sf-s" x="28" y="1036.5">无记录 → 回 pending 重派</text>
+<path class="sf-flow" d="M296 475.5 L210 475.5" marker-end="url(#sf-arrow)"/>
+<text class="sf-lab" x="259" y="470.5" text-anchor="middle">落表</text>
+<path class="sf-flow" d="M296 551 L210 551" marker-end="url(#sf-arrow)"/>
+<text class="sf-lab" x="259" y="546" text-anchor="middle">认领</text>
+<path class="sf-flow" d="M296 595 L210 595" marker-end="url(#sf-arrow)"/>
+<text class="sf-lab" x="259" y="590" text-anchor="middle">发布确认</text>
+<path class="sf-flow" d="M296 854.75 L210 854.75" marker-end="url(#sf-arrow)"/>
+<text class="sf-lab" x="259" y="849.75" text-anchor="middle">成功回写</text>
+<path class="sf-rec" d="M222 990.5 L296 990.5" marker-end="url(#sf-arrow-rec)"/>
+<text class="sf-lab" x="259" y="985.5" text-anchor="middle">扫描超时行</text>
+<path class="sf-rec" d="M296 1012.5 L222 1012.5" marker-end="url(#sf-arrow-rec)"/>
+<text class="sf-lab" x="259" y="1007.5" text-anchor="middle">落终态</text>
+<path class="sf-rec" d="M296 1032.5 L222 1032.5" marker-end="url(#sf-arrow-rec)"/>
+<text class="sf-lab" x="259" y="1027.5" text-anchor="middle">回 pending</text>
+<rect class="sf-sr" x="768" y="127" width="250" height="67" rx="7"/>
+<text class="sf-tt sf-tr" x="782" y="147">Redis · cron 防重锁</text>
+<text class="sf-tag" x="1004" y="147" text-anchor="end">key</text>
+<text class="sf-b" x="782" y="165"><tspan class="sf-m">schedule_stable:cron:&lt;resource&gt;</tspan></text>
+<text class="sf-b" x="782" y="181.5">SETNX；TTL 30s，<tspan class="sf-m">@every</tspan>&#160;减半</text>
+<rect class="sf-sr" x="768" y="531.25" width="250" height="83.5" rx="7"/>
+<text class="sf-tt sf-tr" x="782" y="551.25">Redis · 账本 Ledger</text>
+<text class="sf-tag" x="1004" y="551.25" text-anchor="end">hash</text>
+<text class="sf-b" x="782" y="569.25"><tspan class="sf-m">schedule_stable:ledger</tspan></text>
+<text class="sf-b" x="782" y="585.75">发布成功后&#160;<tspan class="sf-m">Record</tspan>：UUID → taskID</text>
+<text class="sf-b" x="782" y="602.25">仅加速索引，对账不依赖它</text>
+<rect class="sf-sx" x="768" y="649.5" width="250" height="83.5" rx="7"/>
+<text class="sf-tt sf-tx" x="782" y="669.5">dm 服务 · 集群节点表</text>
+<text class="sf-tag" x="1004" y="669.5" text-anchor="end">外部</text>
+<text class="sf-b" x="782" y="687.5"><tspan class="sf-m">ListClusterNodesStatus</tspan></text>
+<text class="sf-b" x="782" y="704">unix socket；TTL 10s 缓存</text>
+<text class="sf-b" x="782" y="720.5">本节点 ID 也来自它</text>
+<rect class="sf-sr" x="768" y="740" width="250" height="98" rx="7"/>
+<text class="sf-tt sf-tr" x="782" y="767.25">Redis · 队列（broker）</text>
+<text class="sf-tag" x="1004" y="767.25" text-anchor="end">list</text>
+<text class="sf-b" x="782" y="785.25"><tspan class="sf-m">queue:&lt;resource&gt;/&lt;node&gt;</tspan></text>
+<text class="sf-b" x="782" y="801.75">list；ETA 在未来则进延迟 zset</text>
+<text class="sf-b" x="782" y="818.25">无持久化，重启即丢</text>
+<rect class="sf-sr" x="768" y="878.5" width="250" height="94" rx="7"/>
+<text class="sf-tt sf-tr" x="782" y="903.75">Redis · 任务状态</text>
+<text class="sf-tag" x="1004" y="903.75" text-anchor="end">backend · hash</text>
+<text class="sf-b" x="782" y="921.75">PENDING → RECEIVED → STARTED</text>
+<text class="sf-b" x="782" y="938.25">→ RETRY → SUCCESS / FAILURE</text>
+<text class="sf-b" x="782" y="954.75">按 UUID 覆盖写，缺省保留 1 小时</text>
+<rect class="sf-note" x="768" y="271.375" width="250" height="182.5" rx="7"/>
+<text class="sf-tt" x="782" y="291.375">要点</text>
+<text class="sf-b" x="782" y="309.375">队列按「资源 × 节点」划分，每个</text>
+<text class="sf-b" x="782" y="325.875">节点只消费自己的队列。</text>
+<text class="sf-b" x="782" y="358.875">Redis 无持久化，恢复只依赖表的</text>
+<text class="sf-b" x="782" y="375.375"><tspan class="sf-m">phase + updated_at</tspan>。</text>
+<text class="sf-b" x="782" y="408.375">至少一次投递：发布成功但未确认</text>
+<text class="sf-b" x="782" y="424.875">即崩溃的行会被重派，消费端须按</text>
+<text class="sf-b" x="782" y="441.375"><tspan class="sf-m">IdempotencyKey</tspan>&#160;幂等。</text>
+<path class="sf-flow" d="M694 160.5 L768 160.5" marker-end="url(#sf-arrow)"/>
+<text class="sf-lab" x="731" y="155.5" text-anchor="middle">抢锁 SETNX</text>
+<path class="sf-flow" d="M768 683 L694 683" marker-end="url(#sf-arrow)"/>
+<text class="sf-lab" x="731" y="678" text-anchor="middle">节点表</text>
+<path class="sf-flow" d="M694 749 L768 749" marker-end="url(#sf-arrow)"/>
+<text class="sf-lab" x="731" y="744" text-anchor="middle">SendTask</text>
+<path class="sf-flow" d="M768 829 L694 829" marker-end="url(#sf-arrow)"/>
+<text class="sf-lab" x="731" y="824" text-anchor="middle">消费</text>
+<path class="sf-flow" d="M694 878.5 L768 878.5" marker-end="url(#sf-arrow)"/>
+<text class="sf-lab" x="731" y="873.5" text-anchor="middle">写执行状态</text>
+<path class="sf-rec" d="M768 972.5 L694 972.5" marker-end="url(#sf-arrow-rec)"/>
+<text class="sf-lab" x="731" y="967.5" text-anchor="middle">GetState</text>
+<path class="sf-thin" d="M792 878.5 L792 838" marker-end="url(#sf-arrow-thin)"/>
+<text class="sf-s" x="800" y="862.25">按&#160;<tspan class="sf-m">Retries</tspan>&#160;执行内重试，延迟后重投</text>
+<rect class="sf-panel" x="16" y="1086.0" width="1002" height="228.5" rx="9"/>
+<text class="sf-sec" x="30" y="1112">持久化转发 · 其他节点提交持久化任务只经 Dispatcher，DB 写入收敛在 leader</text>
+<rect class="sf-card sf-b3" x="30" y="1164" width="210" height="100" rx="7"/>
+<text class="sf-tt sf-t3" x="44" y="1200.5">生产方 Dispatcher</text>
+<text class="sf-b" x="44" y="1218.5">任意节点，自己不落表</text>
+<text class="sf-b" x="44" y="1235">带&#160;<tspan class="sf-m">AttributePersistent</tspan>&#160;标记</text>
+<rect class="sf-sr" x="416" y="1164" width="220" height="100" rx="7"/>
+<text class="sf-tt sf-tr" x="430" y="1200.5">Redis 队列</text>
+<text class="sf-tag" x="622" y="1200.5" text-anchor="end">list</text>
+<text class="sf-b" x="430" y="1218.5"><tspan class="sf-m">queue:persistents/&lt;leader&gt;</tspan></text>
+<text class="sf-b" x="430" y="1235">只投给 leader 节点</text>
+<rect class="sf-card sf-b2" x="726" y="1164" width="278" height="100" rx="7"/>
+<text class="sf-tt sf-t2" x="740" y="1184">leader 节点：tasks/persistents</text>
+<text class="sf-b" x="740" y="1202">① 解码内层 Signature</text>
+<text class="sf-b" x="740" y="1218.5">②&#160;<tspan class="sf-m">Create</tspan>&#160;写入&#160;<tspan class="sf-m">task_persistents</tspan></text>
+<text class="sf-b" x="740" y="1235">③&#160;<tspan class="sf-m">Claim</tspan>&#160;→ dispatching，再重发</text>
+<text class="sf-b" x="740" y="1251.5">④&#160;<tspan class="sf-m">MarkDispatched</tspan>&#160;确认；失败由对账收敛</text>
+<path class="sf-flow" d="M240 1214 L416 1214" marker-end="url(#sf-arrow)"/>
+<text class="sf-lab" x="328" y="1204" text-anchor="middle">包装为&#160;<tspan class="sf-m">persistent_forward</tspan></text>
+<text class="sf-lab" x="328" y="1228" text-anchor="middle"><tspan class="sf-m">AttributeRoles = LEADER</tspan></text>
+<path class="sf-flow" d="M636 1214 L726 1214" marker-end="url(#sf-arrow)"/>
+<text class="sf-lab" x="681" y="1209" text-anchor="middle">leader 消费</text>
+<text class="sf-s" x="30" y="1286">重发的内层 Signature 回到主链路的&#160;<tspan class="sf-m">Dispatcher</tspan>，按节点表路由到执行队列；重复投递由幂等键与阶段判断去重，确认失败由对账收敛。</text>
+<text class="sf-h1" x="16" y="36">stateflux 数据流</text>
+<text class="sf-lab" x="952.814" y="31">对账 / 重派</text>
+<path class="sf-rec" d="M914.814 27 L944.814 27" marker-end="url(#sf-arrow-rec)"/>
+<text class="sf-lab" x="838.129" y="31">任务 / 数据流</text>
+<path class="sf-flow" d="M800.129 27 L830.129 27" marker-end="url(#sf-arrow)"/>
+<text class="sf-s" x="16" y="1344.5">代码入口：<tspan class="sf-m">entry.go</tspan>（<tspan class="sf-m">Run</tspan>&#160;装配与生命周期）·&#160;<tspan class="sf-m">scheduler.go</tspan>（Listener / CronScheduler / Publisher）·&#160;<tspan class="sf-m">dispatch/</tspan>（Dispatcher、节点表、持久化转发）</text>
+<text class="sf-s" x="16" y="1361"><tspan class="sf-m">states/</tspan>（repo、Ledger、Reconciler）·&#160;<tspan class="sf-m">tasks/persistents/</tspan>（Forwarder）· 细节见&#160;<tspan class="sf-m">docs/DESIGN.md</tspan></text>
+</svg>

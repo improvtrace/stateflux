@@ -12,6 +12,13 @@ cron 到点 → listener 分发事件 → CronScheduler 取 factory 批次 → p
 Signature 会被包装成 `persistent_forward` 仅投递到 leader，由 leader 侧
 `tasks/persistents` 先落 task_persistents 再重新发布（DB 写入收敛在 leader）。
 
+## 数据流
+
+[![stateflux 数据流](docs/data_flow.svg)](docs/data_flow.svg)
+
+左列是 `task_persistents` 的阶段，与触发迁移的步骤对齐；右列是 Redis 与 dm 服务。
+实线为任务 / 数据流，虚线为对账 / 重派。点击图片查看原图。
+
 ## 目录布局
 
 ```
@@ -23,7 +30,7 @@ stateflux/                       # 根包 package schedule：entry（Run + wire 
 │   └── mock-dm/                 # dm 服务的本地桩（cobra）：按节点数自动生成集群节点表
 ├── config/                      # 配置：config.go + config.conf.example（ini）
 ├── dispatch/                    # 发布器：节点匹配 + 分节点路由 + 持久化转发
-├── docs/                        # 设计与决策记录（DESIGN.md）与业务任务表示例 schema
+├── docs/                        # 设计与决策记录（DESIGN.md）、数据流图（data_flow.svg）与业务任务表示例 schema
 ├── examples/                    # 场景化集成测试（见 examples/README.md）
 ├── migrations/                  # 数据库迁移的全部逻辑
 │   ├── *.sql, atlas.sum         #   版本化迁移（由 ent schema 经 Atlas 生成，不手写）
